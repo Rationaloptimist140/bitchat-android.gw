@@ -470,9 +470,17 @@ class MessageRouter private constructor(
         }
     }
 
+    // Mesh peers seen in the previous update: only newly appeared peers reset outbox backoff.
+    private val visibleMeshPeers = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
+
     // Called when mesh peer list changes; attempt to flush any matching outbox entries
     fun onPeersUpdated(peers: List<String>) {
         if (peers.isNotEmpty()) kickOutbox()
+        val current = peers.toSet()
+        val appeared = current - visibleMeshPeers
+        visibleMeshPeers.retainAll(current)
+        visibleMeshPeers.addAll(current)
+        appeared.forEach { onMeshTransportAvailable(it, OutboxScheduler.TransportEvent.MESH_PEER_VISIBLE) }
         peers.forEach { pid ->
             kickHandshakeIfPending(pid)
             flushOutboxFor(pid)
@@ -489,6 +497,7 @@ class MessageRouter private constructor(
     // Called when a Noise session becomes established; flush both the mesh peerID and its noiseHex alias
     fun onSessionEstablished(peerID: String) {
         kickOutbox()
+        onMeshTransportAvailable(peerID, OutboxScheduler.TransportEvent.MESH_SESSION_READY)
         resetRetry(peerID)
         flushOutboxFor(peerID)
         val noiseHex = try {
@@ -498,6 +507,44 @@ class MessageRouter private constructor(
             resetRetry(it)
             flushOutboxFor(it)
         }
+    }
+
+    /** The device regained internet: bring waiting outbox work forward (rate-limited). */
+    fun onInternetAvailable() {
+        if (disableSchedulerForTesting) return
+        val outbox = durableOutbox() ?: return
+        outbox.start()
+        schedulerScope.launch {
+            runCatching { outbox.onTransportAvailable(OutboxScheduler.TransportEvent.INTERNET) }
+        }
+        outbox.kick()
+    }
+
+    /** A Bluetooth peer appeared or became ready: bring its conversation's waiting work forward. */
+    private fun onMeshTransportAvailable(peerID: String, event: OutboxScheduler.TransportEvent) {
+        if (disableSchedulerForTesting) return
+        val outbox = durableOutbox() ?: return
+        val conversationIds = meshConversationIds(peerID)
+        if (conversationIds.isEmpty()) return
+        outbox.start()
+        schedulerScope.launch { runCatching { outbox.onTransportAvailable(event, conversationIds) } }
+    }
+
+    /** Every conversation id under which messages to [peerID] may be stored. */
+    private fun meshConversationIds(peerID: String): Set<String> {
+        val ids = linkedSetOf(peerID)
+        runCatching {
+            mesh.getPeerInfo(peerID)?.noisePublicKey?.let { ContactIdentityResolver.noiseKeyHex(it) }
+        }.getOrNull()?.let { ids.add(it) }
+        ids.toList().forEach { id ->
+            runCatching {
+                val canonical = ContactDirectory.canonicalConversationId(id)
+                ids.add(canonical)
+                ids.addAll(ContactDirectory.aliasesForConversation(canonical))
+            }
+        }
+        // Geohash-identity conversations never use the outbox or the mesh.
+        return ids.filterTo(linkedSetOf()) { it.isNotBlank() && !isGeohashConversation(it) }
     }
 
     /** Reset handshake backoff for a conversation whose session just came up. */

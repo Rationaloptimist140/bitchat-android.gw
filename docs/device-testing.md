@@ -162,8 +162,8 @@ Setup: both phones in airplane mode with Bluetooth turned back on, about 1 m apa
 4. Walk B out of range (or turn B's Bluetooth off). A sends "t2-2".
    **Expect:** A stays at Sending.
 5. Bring B back in range.
-   **Expect:** "t2-2" arrives on B once, and A changes to Delivered. No retry tap is needed. It can
-   take up to the next retry interval (5 s, 30 s, 2 min, …).
+   **Expect:** "t2-2" arrives on B once, within a few seconds of B reappearing and its session
+   being re-established, however long B was away. A changes to Delivered. No retry tap is needed.
 
 ### T3 Nostr (internet) messaging
 

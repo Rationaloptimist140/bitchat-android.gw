@@ -240,6 +240,26 @@ cannot open a version 5 database).
   timeout) fail and reconnect instead of silently swallowing writes.
 - **Network monitor.** When a validated internet connection becomes available, disconnected relays
   reconnect immediately (backoff reset) and the outbox is woken (`NetworkMonitor`).
+- **Backoff reset when a transport returns.** No-route retries back off (5 s, 30 s, 2 min, 10 min,
+  1 h, 6 h). When a transport becomes available, waiting work is made due immediately
+  (`OutboxScheduler.onTransportAvailable`, `OutboxStore.advanceWaiting`):
+  - *Internet:* `NetworkMonitor` reports only real transitions (a new validated default network,
+    or one that regained validation or came back after loss), not repeated capability callbacks.
+    Every waiting envelope (messages and receipts) becomes due.
+  - *Bluetooth peer appeared* (newly present in the peer list): waiting messages of that peer's
+    conversations become due, which also nudges a handshake.
+  - *Bluetooth session established:* the same, plus relay-accepted (Sent) messages not yet
+    promoted to the mesh in their retry epoch. They are sent once over Bluetooth while staying
+    Sent until a receipt arrives.
+  - *Safety:* the reset changes only `next_attempt_at`. State, attempt count (so backoff keeps
+    growing if the attempt fails), retry epoch, expiry and message id are unchanged. Leased
+    (in-flight) envelopes, envelopes released in the last 2 s, envelopes inside a 30 s mesh
+    receipt wait, and expired, delivered or failed envelopes are untouched. The attempt then
+    goes through the normal leased claim, so there are never concurrent sends.
+  - *Anti-flap:* each trigger key (internet, or one conversation and event type) resets at most
+    once every 30 s, so a flapping network or Bluetooth peer adds at most one extra attempt per
+    30 s.
+  - Geohash-identity conversations are excluded.
 - **After a reboot or force-stop**, the outbox resumes when the message router is created: when the
   app is opened, or when someone replies from a notification. The boot-started mesh service alone
   does not start it, so queued messages wait until the app is opened.

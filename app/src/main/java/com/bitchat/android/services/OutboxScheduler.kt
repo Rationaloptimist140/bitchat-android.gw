@@ -80,6 +80,54 @@ internal class OutboxScheduler(
         loopJob = null
     }
 
+    /** Which transport just became available. */
+    enum class TransportEvent {
+        /** The device regained a validated internet connection. */
+        INTERNET,
+        /** A Bluetooth peer appeared (a handshake may still be needed). */
+        MESH_PEER_VISIBLE,
+        /** A Noise session with a Bluetooth peer was established: the mesh route is ready. */
+        MESH_SESSION_READY
+    }
+
+    private val wakeLimiter = TransportWakeLimiter(WAKE_MIN_INTERVAL_MS)
+
+    /**
+     * Brings waiting work forward when a transport becomes available, instead of leaving it on
+     * its backoff timer (up to 6 h). Bounded: each trigger key (internet, or one conversation's
+     * mesh peer) resets at most once per [WAKE_MIN_INTERVAL_MS], rows attempted in the last
+     * [WAKE_MIN_IDLE_MS] or awaiting a mesh receipt are skipped, and the attempt then runs through
+     * the normal leased claim, so no envelope is ever sent concurrently. Returns the number of
+     * envelopes made due.
+     */
+    suspend fun onTransportAvailable(event: TransportEvent, conversationIds: Set<String> = emptySet()): Int {
+        val now = clock()
+        val meshScoped = event != TransportEvent.INTERNET
+        if (meshScoped && conversationIds.isEmpty()) return 0
+        val key = if (meshScoped) {
+            "mesh:${event.name}:" + conversationIds.map { it.lowercase() }.sorted().first()
+        } else {
+            "internet"
+        }
+        if (!wakeLimiter.tryAcquire(key, now)) return 0
+        val advanced = runCatching {
+            repository.withOutbox {
+                it.advanceWaiting(
+                    now = now,
+                    minIdleMs = WAKE_MIN_IDLE_MS,
+                    meshReceiptWindowMs = MESH_RECEIPT_TIMEOUT_MS,
+                    conversationIds = if (meshScoped) conversationIds else null,
+                    includeUnpromotedAccepted = event == TransportEvent.MESH_SESSION_READY
+                )
+            }
+        }.getOrDefault(0)
+        if (advanced > 0) {
+            Log.d(TAG, "Transport available (${event.name}): $advanced envelope(s) due now")
+            kick()
+        }
+        return advanced
+    }
+
     /** Requests an immediate pass (new message, peer appeared, session or network available). */
     fun kick() {
         wake.trySend(Unit)
@@ -190,6 +238,15 @@ internal class OutboxScheduler(
         private const val MIN_WAIT_MS = 250L
         private const val MAX_WAIT_MS = 30_000L
         private const val LEGACY_ADOPT_MAX_AGE_MS = ConversationDatabase.OUTBOX_MESSAGE_EXPIRY_MS
+
+        /** At most one backoff reset per trigger key (internet / one mesh peer) in this window. */
+        const val WAKE_MIN_INTERVAL_MS = 30_000L
+        /**
+         * Envelopes released this recently keep their timer (the attempt that just ran already
+         * saw the current transports). Short, so a handshake completing a second after the peer
+         * appeared still wakes the message.
+         */
+        const val WAKE_MIN_IDLE_MS = 2_000L
 
         private val RETRY_DELAYS_MS = longArrayOf(5_000L, 30_000L, 120_000L, 600_000L, 3_600_000L, 21_600_000L)
         private val REPUBLISH_DELAYS_MS = longArrayOf(3_600_000L, 21_600_000L, 86_400_000L, 259_200_000L)

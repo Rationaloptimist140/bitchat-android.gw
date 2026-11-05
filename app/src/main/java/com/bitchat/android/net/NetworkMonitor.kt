@@ -22,13 +22,18 @@ object NetworkMonitor {
 
     @Volatile private var registered = false
 
+    private val tracker = ValidatedNetworkTracker()
+
     private val callback = object : ConnectivityManager.NetworkCallback() {
         override fun onCapabilitiesChanged(network: Network, capabilities: NetworkCapabilities) {
-            if (capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET) &&
+            val validated = capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET) &&
                 capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED)
-            ) {
-                onInternetAvailable()
-            }
+            // Capability callbacks repeat for signal and bandwidth changes; act on transitions only.
+            if (tracker.onCapabilities(network.toString(), validated)) onInternetAvailable()
+        }
+
+        override fun onLost(network: Network) {
+            tracker.onLost(network.toString())
         }
     }
 
@@ -46,7 +51,33 @@ object NetworkMonitor {
         NostrRelayManager.all().forEach { manager ->
             runCatching { manager.onNetworkAvailable() }
         }
-        runCatching { MessageRouter.tryGetInstance()?.kickOutbox() }
+        runCatching { MessageRouter.tryGetInstance()?.onInternetAvailable() }
         runCatching { com.bitchat.android.nostr.NostrBackgroundRuntime.requestHistoryBackfill() }
+    }
+}
+
+/**
+ * Turns the stream of default-network capability callbacks into "internet became available"
+ * transitions: a validated network that differs from the last one, or the same network after it
+ * lost validation or was lost. Repeated callbacks for an unchanged validated network are ignored.
+ */
+internal class ValidatedNetworkTracker {
+    private var current: String? = null
+
+    /** Returns true when this callback is a transition to a (new) validated network. */
+    @Synchronized
+    fun onCapabilities(networkId: String, validated: Boolean): Boolean {
+        if (!validated) {
+            if (current == networkId) current = null
+            return false
+        }
+        if (current == networkId) return false
+        current = networkId
+        return true
+    }
+
+    @Synchronized
+    fun onLost(networkId: String) {
+        if (current == networkId) current = null
     }
 }

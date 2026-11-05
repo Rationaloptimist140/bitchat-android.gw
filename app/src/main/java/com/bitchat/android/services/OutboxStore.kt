@@ -186,6 +186,62 @@ internal class OutboxStore(
         )
     }
 
+    /**
+     * A transport became available: make eligible waiting envelopes due at [now] instead of at
+     * their backoff time. Only unleased, unexpired envelopes that were not touched in the last
+     * [minIdleMs] and are not inside a mesh receipt window ([meshReceiptWindowMs]) qualify.
+     * State, attempt count, retry epoch, expiry and message ids are unchanged, so the next
+     * attempt goes through the normal claim (lease) path and the backoff keeps growing if it
+     * fails again.
+     *
+     * [conversationIds] limits the reset to message envelopes of those conversations (a mesh
+     * peer); null means every waiting envelope (internet). [includeUnpromotedAccepted] also wakes
+     * relay-accepted messages not yet promoted to the mesh in their retry epoch.
+     */
+    fun advanceWaiting(
+        now: Long,
+        minIdleMs: Long,
+        meshReceiptWindowMs: Long,
+        conversationIds: Collection<String>?,
+        includeUnpromotedAccepted: Boolean = false
+    ): Int {
+        if (conversationIds != null && conversationIds.isEmpty()) return 0
+        val args = mutableListOf<Any>(now, now, now, now, now - minIdleMs, now - meshReceiptWindowMs)
+        val stateClause = if (includeUnpromotedAccepted) {
+            "(state = ${State.RETRY_WAIT.code} OR (state = ${State.CARRIER_ACCEPTED.code} " +
+                "AND kind = ${Kind.MESSAGE.code} AND mesh_promoted_epoch <> retry_epoch AND republish_until > ?))"
+        } else {
+            "state = ${State.RETRY_WAIT.code}"
+        }
+        if (includeUnpromotedAccepted) args.add(now)
+        val scope = if (conversationIds == null) "" else {
+            val ids = conversationIds.map { it.trim().lowercase() }.filter { it.isNotEmpty() }.distinct()
+            if (ids.isEmpty()) return 0
+            args.addAll(ids)
+            " AND kind = ${Kind.MESSAGE.code} AND message_id IN (SELECT message_id FROM private_messages " +
+                "WHERE lower(conversation_id) IN (${ids.joinToString(",") { "?" }}))"
+        }
+        val db = database.writableDatabase
+        return db.transaction {
+            val sql = """
+                UPDATE $TABLE_ENVELOPES SET next_attempt_at = ?
+                WHERE next_attempt_at > ? AND (lease_until IS NULL OR lease_until <= ?)
+                  AND expires_at > ? AND updated_at <= ?
+                  AND (mesh_sent_at IS NULL OR mesh_sent_at <= ?)
+                  AND $stateClause$scope
+            """.trimIndent()
+            compileStatement(sql).use { statement ->
+                args.forEachIndexed { index, value ->
+                    when (value) {
+                        is Long -> statement.bindLong(index + 1, value)
+                        else -> statement.bindString(index + 1, value.toString())
+                    }
+                }
+                statement.executeUpdateDelete()
+            }
+        }
+    }
+
     /** A mesh send was handed off; wait for the recipient's receipt until [nextAttemptAt]. */
     fun markMeshSent(envelopeId: String, now: Long, nextAttemptAt: Long, promotedEpoch: Int?) {
         database.writableDatabase.update(
