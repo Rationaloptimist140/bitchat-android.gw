@@ -172,7 +172,11 @@ class PrivateChatManager(
         )
 
         // The message row and its durable outbox envelope are written in one transaction.
-        if (!messageManager.addPrivateMessageDurably(conversationID, message, forceRead = true, enqueueOutbound = true)) {
+        // Geohash-identity DMs are excluded: they are sent directly on the location relays with
+        // that identity, and the outbox (mesh / account-identity routes) must never carry them.
+        val isGeohashDm = com.bitchat.android.nostr.GeohashAliasRegistry.contains(peerID) ||
+            com.bitchat.android.nostr.GeohashAliasRegistry.contains(conversationID)
+        if (!messageManager.addPrivateMessageDurably(conversationID, message, forceRead = true, enqueueOutbound = !isGeohashDm)) {
             return false
         }
         onSendMessage(content, conversationID, recipientNickname ?: "", message.id)

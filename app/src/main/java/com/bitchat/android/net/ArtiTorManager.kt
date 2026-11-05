@@ -54,6 +54,14 @@ class ArtiTorManager private constructor() {
     companion object {
         private const val TAG = "ArtiTorManager"
         private const val DEFAULT_SOCKS_PORT = AppConstants.Tor.DEFAULT_SOCKS_PORT
+
+        private val HOST_PORT = Regex("""\b(to|for)\s+\S+:\d{1,5}\b""", RegexOption.IGNORE_CASE)
+
+        /**
+         * The native SOCKS bridge logs each destination ("CONNECT to relay.example:443"). The
+         * About screen shows the last line, so strip relay hosts before it is displayed.
+         */
+        internal fun redactLogLine(line: String): String = HOST_PORT.replace(line) { "${it.groupValues[1]} [destination]" }
         private const val RESTART_DELAY_MS = AppConstants.Tor.RESTART_DELAY_MS
         private const val INACTIVITY_TIMEOUT_MS = AppConstants.Tor.INACTIVITY_TIMEOUT_MS
         private const val MAX_RETRY_ATTEMPTS = AppConstants.Tor.MAX_RETRY_ATTEMPTS
@@ -131,7 +139,7 @@ class ArtiTorManager private constructor() {
                 val text = logLine ?: return@ArtiLogListener
                 val s = text
                 lastLogTime.set(System.currentTimeMillis())
-                _statusFlow.update { it.copy(lastLogLine = s) }
+                _statusFlow.update { it.copy(lastLogLine = redactLogLine(s)) }
                 handleArtiLogLine(s)
                 if (_statusFlow.value.bootstrapPercent < 100) {
                     armBootstrapInactivityWatchdog()

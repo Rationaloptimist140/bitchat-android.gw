@@ -85,8 +85,32 @@ account DM subscription and DMs went to every connected relay, including relays 
 they are near the user's geohash, so one connection could link the account npub, and every npub it
 messaged, to an approximate location.
 
-Remaining limitation: both managers share the Tor SOCKS proxy without stream isolation, so a Tor
-exit may see both connections; relay operators see separate connections.
+Remaining limitation: Tor streams are **not** isolated. The bundled native SOCKS bridge
+(`tools/arti-build/src/lib.rs`) always negotiates "no authentication" and calls
+`TorClient::connect` with default stream preferences, so DM relays, location relays and HTTP
+requests can share one circuit and one exit. An exit (or someone watching it) can see that one Tor
+user is connected to both the DM relays and a set of location relays at the same time. Relay
+operators still see separate connections. Isolation needs a native change (see "Tor stream
+isolation" below); it cannot be done from Kotlin alone.
+
+### Tor stream isolation (design, not implemented)
+
+1. **Native bridge** (`tools/arti-build/src/lib.rs`): accept SOCKS5 username/password (method
+   0x02) when offered. Map each username to an `IsolationToken` (bounded map) and connect with
+   `client.connect_with_prefs(addr, StreamPrefs::new().set_isolation(token))`. Stop logging
+   destination hosts ("CONNECT to …", "established to …", "closed for …").
+2. **Kotlin**: give the private-messaging and location relay managers separate OkHttp clients,
+   with SOCKS credentials per purpose (`gw-dm-<epoch>`, `gw-location-<epoch>`), rotated on Tor
+   restart. Java's SOCKS client offers username/password automatically and takes credentials from
+   `java.net.Authenticator`, keyed by the client's dispatcher thread.
+3. Rebuild `libarti_android.so` for all four ABIs with `tools/arti-build/build-arti.sh` (Rust and
+   the NDK are needed). Then test on a device: bootstrap, reconnect, Tor off/on, and confirm with
+   Arti debug logs that DM and location streams use different circuits.
+
+Not done in this pass: the native libraries can't be rebuilt or device-tested here, and committing
+unbuilt Rust would leave the source out of step with the shipped binaries. Interim mitigation:
+destination hosts are removed from the Tor log line shown in the About screen
+(`ArtiTorManager.redactLogLine`). The native bridge still writes them to logcat.
 
 ## Relay acknowledgement
 
@@ -182,6 +206,15 @@ epoch. The first authenticated receipt from either transport completes it.
   bumps `retry_epoch`, resets attempts and expiry, and keeps the message id.
 - Deleting a message or conversation removes its envelopes and events, and the claim step re-checks
   tombstones. Retention pruning skips messages that still have an active envelope.
+- **Tombstone retention.** Deleted and retention-pruned messages leave a tombstone that blocks
+  re-insertion from any transport. A legitimate copy can arrive again until the sender's outbox
+  gives up (7 days after sending) and its last gift wrap ages out of the accepted window (7 days
+  23 hours): about 15 days. Tombstones younger than 30 days are therefore never pruned by count.
+  Older tombstones are trimmed to 20 000 (oldest first), and a hard ceiling of 50 000 rows
+  (about 4 MB) applies only under abuse, such as a flood that forces constant pruning. Previously
+  tombstones were capped at 20 000 by count alone, and pruning creates tombstones too. A busy
+  device could therefore drop a recent deletion within days and let a retry or relay replay bring
+  the message back. No schema change was needed.
 - Panic wipe: `clearAll()` destroys the storage key and then explicitly deletes every outbox table
   (it does not rely on cascades). The scheduler then finds no work.
 - Messages left at Sending by an older version are adopted on first start if they are less than 7
@@ -207,6 +240,9 @@ cannot open a version 5 database).
   timeout) fail and reconnect instead of silently swallowing writes.
 - **Network monitor.** When a validated internet connection becomes available, disconnected relays
   reconnect immediately (backoff reset) and the outbox is woken (`NetworkMonitor`).
+- **After a reboot or force-stop**, the outbox resumes when the message router is created: when the
+  app is opened, or when someone replies from a notification. The boot-started mesh service alone
+  does not start it, so queued messages wait until the app is opened.
 
 ## History synchronisation
 
@@ -222,10 +258,29 @@ cannot open a version 5 database).
   after that relay's whole window was fetched. Positions never move backwards.
 - **Age limit.** Gift wraps older than 7 days + 23 h are dropped (previously 48 h 15 min).
   Replays inside the window are harmless: text is deduplicated by message id, deletions by
-  tombstones (kept for the most recent 20 000 deletions), and files by a deterministic id.
+  tombstones (kept for at least 30 days below the hard ceiling, see "Tombstone retention"), and files by a deterministic id.
 - **File messages.** A file received over Nostr gets a stable id (sender key + SHA-256 of the
   payload), so relay replays, retries and backfill do not create duplicate file messages. Known or
   deleted files are skipped before anything is written to disk.
+
+## Geohash-identity DMs (weaker guarantees, by design)
+
+DMs in location channels use a per-geohash identity and the location relays. They keep their
+upstream delivery model, and none of the private-messaging guarantees above apply to them:
+
+- They are sent once, directly, on the location relays. They have **no durable outbox**: no retry
+  after an app restart, no expiry and no Retry sending. They show Sent when a location relay
+  accepts them, and Delivered/Read only if the recipient sends a receipt.
+- Their receipts are sent once, without retry. A lost receipt leaves the sender at Sent.
+- They are kept out of the outbox deliberately. Its routes (mesh, account-identity Nostr) would
+  link the geohash persona to the account. `PrivateChatManager` creates no envelope for geohash
+  aliases, and the scheduler refuses to route them.
+- Before this fix, geohash DMs were given an outbox envelope that could never be routed. They then
+  showed Failed after 7 days without a receipt and, in one edge case, could have been routed with
+  the account identity.
+
+The private-messaging guarantees are unaffected: account DMs and mesh messages never use the
+geohash path.
 
 ## Known pre-existing test issues
 

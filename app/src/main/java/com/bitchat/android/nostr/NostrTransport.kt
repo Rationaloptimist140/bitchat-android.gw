@@ -65,6 +65,10 @@ class NostrTransport(
         transportScope.launch {
             NostrRelayManager.privateMessaging.publishOutcomes.collect { onPublishOutcome(it) }
         }
+        // Geohash-identity DMs are published on the location manager; same rule, no outbox.
+        transportScope.launch {
+            NostrRelayManager.shared.publishOutcomes.collect { onPublishOutcome(it) }
+        }
     }
 
     /** Registers a published private-message event so relay `OK` frames can update its status. */
@@ -479,9 +483,12 @@ class NostrTransport(
                     senderIdentity = fromIdentity
                 )
 
+                val manager = NostrRelayManager.getInstance(context)
                 giftWraps.forEach { event ->
                     NostrRelayManager.registerPendingGiftWrap(event.id)
-                    NostrRelayManager.getInstance(context).sendEvent(event)
+                    val relays = manager.getRelayStatuses().map { it.url }
+                    if (relays.isNotEmpty()) trackPublishedMessage(event.id, messageID, relays)
+                    manager.sendEvent(event)
                 }
             } catch (e: Exception) {
                 Log.e(TAG, "Failed to send geohash private message: ${e.message}")

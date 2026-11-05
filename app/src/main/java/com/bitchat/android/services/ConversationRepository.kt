@@ -420,8 +420,12 @@ internal class ConversationDatabase(
     private val maxPayloadBytes: Long = MAX_PAYLOAD_BYTES,
     private val maxMediaBytes: Long = MAX_MEDIA_BYTES,
     private val storageCipher: ConversationStorageCipher =
-        AndroidConversationStorageCipher()
+        AndroidConversationStorageCipher(),
+    private val tombstoneRetentionMs: Long = TOMBSTONE_RETENTION_MS,
+    maxTombstones: Int = MAX_TOMBSTONES,
+    private val clock: () -> Long = System::currentTimeMillis
 ) : SQLiteOpenHelper(context, databaseName, null, DATABASE_VERSION) {
+    private val maxTombstones: Int = maxOf(maxTombstones, maxMessagesTotal)
 
     companion object {
         private const val TAG = "ConversationDatabase"
@@ -434,6 +438,17 @@ internal class ConversationDatabase(
         internal const val DATABASE_VERSION = 5
         /** Undelivered outgoing messages keep retrying for this long before showing Failed. */
         internal const val OUTBOX_MESSAGE_EXPIRY_MS = 7L * 24 * 60 * 60 * 1000
+
+        /**
+         * Deletion tombstones are never pruned by count while younger than this. A deleted or
+         * pruned message can legitimately arrive again until the sender's outbox gives up
+         * (7 days after sending) and its last gift wrap ages out of the accepted window
+         * (7 days 23 hours). That is about 15 days; 30 days adds headroom for clock skew.
+         */
+        internal const val TOMBSTONE_RETENTION_MS = 30L * 24 * 60 * 60 * 1000
+
+        /** Hard ceiling on tombstone rows (about 4 MB on disk), reached only under abuse. */
+        internal const val MAX_TOMBSTONES = 50_000
         private const val PRUNE_INTERVAL = 64
         private const val PRUNE_BATCH_SIZE = 256
     }
@@ -1124,7 +1139,7 @@ internal class ConversationDatabase(
                     SELECT message_id, ? FROM private_messages
                     WHERE conversation_id = ? COLLATE NOCASE
                     """.trimIndent(),
-                    arrayOf<Any>(System.currentTimeMillis(), id)
+                    arrayOf<Any>(clock(), id)
                 )
             }
             val messageIDs = ids
@@ -1154,7 +1169,7 @@ internal class ConversationDatabase(
                 null,
                 ContentValues().apply {
                     put("message_id", messageID)
-                    put("deleted_at", System.currentTimeMillis())
+                    put("deleted_at", clock())
                 },
                 SQLiteDatabase.CONFLICT_REPLACE
             )
@@ -1473,25 +1488,49 @@ internal class ConversationDatabase(
             arrayOf(messageID)
         ) > 0L
 
+    /**
+     * Bounds tombstone storage without weakening deletion guarantees: tombstones inside the
+     * replay window ([tombstoneRetentionMs]) are kept regardless of count; older ones are trimmed
+     * to the original soft limit (oldest first); [maxTombstones] is a hard ceiling for abuse.
+     */
     private fun pruneDeletedMessageIDsLocked(db: SQLiteDatabase) {
-        val excess = (
-            db.longForQuery(
-                "SELECT COUNT(*) FROM deleted_private_messages",
-                emptyArray()
-            ) - maxMessagesTotal
-            ).coerceAtLeast(0L)
-        if (excess == 0L) return
-        db.execSQL(
-            """
-            DELETE FROM deleted_private_messages
-            WHERE message_id IN (
-                SELECT message_id FROM deleted_private_messages
-                ORDER BY deleted_at ASC
-                LIMIT ?
-            )
-            """.trimIndent(),
-            arrayOf(excess)
+        val total = db.longForQuery("SELECT COUNT(*) FROM deleted_private_messages", emptyArray())
+        if (total <= maxMessagesTotal) return
+        val horizon = clock() - tombstoneRetentionMs
+        val expired = db.longForQuery(
+            "SELECT COUNT(*) FROM deleted_private_messages WHERE deleted_at < ?",
+            arrayOf(horizon.toString())
         )
+        val expiredExcess = minOf(total - maxMessagesTotal, expired)
+        if (expiredExcess > 0L) {
+            db.execSQL(
+                """
+                DELETE FROM deleted_private_messages
+                WHERE message_id IN (
+                    SELECT message_id FROM deleted_private_messages
+                    WHERE deleted_at < ?
+                    ORDER BY deleted_at ASC
+                    LIMIT ?
+                )
+                """.trimIndent(),
+                arrayOf<Any>(horizon, expiredExcess)
+            )
+        }
+        val hardExcess = (total - expiredExcess - maxTombstones).coerceAtLeast(0L)
+        if (hardExcess > 0L) {
+            Log.w(TAG, "Tombstone ceiling reached; dropping $hardExcess oldest deletion records")
+            db.execSQL(
+                """
+                DELETE FROM deleted_private_messages
+                WHERE message_id IN (
+                    SELECT message_id FROM deleted_private_messages
+                    ORDER BY deleted_at ASC
+                    LIMIT ?
+                )
+                """.trimIndent(),
+                arrayOf<Any>(hardExcess)
+            )
+        }
     }
 
     private fun pruneConversationLocked(
@@ -1734,7 +1773,7 @@ internal class ConversationDatabase(
         db: SQLiteDatabase,
         messageIDs: Collection<String>
     ) {
-        val deletedAt = System.currentTimeMillis()
+        val deletedAt = clock()
         messageIDs.forEach { messageID ->
             db.insertWithOnConflict(
                 "deleted_private_messages",

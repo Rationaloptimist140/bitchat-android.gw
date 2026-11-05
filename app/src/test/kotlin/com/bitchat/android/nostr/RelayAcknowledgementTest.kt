@@ -183,6 +183,15 @@ class RelayAcknowledgementTest {
     }
 
     @Test
+    fun `geohash DM accepted by a location relay reaches Sent`() {
+        storeOutgoing("geo-sent")
+        val transport = NostrTransport.getInstance(RuntimeEnvironment.getApplication())
+        transport.trackPublishedMessage("event-geo", "geo-sent", listOf("wss://geo.example"))
+        NostrRelayManager.shared.handleRelayFrameForTest(ok("event-geo", true, ""), "wss://geo.example")
+        runBlocking { kotlinx.coroutines.withTimeout(5_000) { while (status("geo-sent") != DeliveryStatus.Sent) kotlinx.coroutines.delay(20) } }
+    }
+
+    @Test
     fun `private message rejected by every relay is failed, never sent`() {
         storeOutgoing("status-failed")
         val transport = NostrTransport.getInstance(RuntimeEnvironment.getApplication())

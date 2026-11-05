@@ -96,10 +96,15 @@ class MessageRouter private constructor(
     private val outboxRouting = object : OutboxScheduler.Routing {
         override val mesh: MeshService get() = this@MessageRouter.mesh
         override fun readyMeshTarget(conversationId: String): String? =
-            ContactDirectory.resolve(conversationId).meshPeerID?.takeIf { isReady(this@MessageRouter.mesh, it) }
+            if (isGeohashConversation(conversationId)) null
+            else ContactDirectory.resolve(conversationId).meshPeerID?.takeIf { isReady(this@MessageRouter.mesh, it) }
         override fun visibleMeshTarget(conversationId: String): String? =
-            ContactDirectory.resolve(conversationId).meshPeerID?.takeIf { isConnected(this@MessageRouter.mesh, it) }
+            if (isGeohashConversation(conversationId)) null
+            else ContactDirectory.resolve(conversationId).meshPeerID?.takeIf { isConnected(this@MessageRouter.mesh, it) }
         override fun nostrTarget(conversationId: String): String? {
+            // Never route a geohash-identity conversation with the account identity: that would
+            // link the geohash persona to the account npub.
+            if (isGeohashConversation(conversationId)) return null
             val resolution = ContactDirectory.resolve(conversationId)
             val target = resolution.noiseKeyHex ?: conversationId
             return target.takeIf { canSendViaNostr(it) }
@@ -426,6 +431,9 @@ class MessageRouter private constructor(
             retryState.remove(conversationID)
         }
     }
+
+    private fun isGeohashConversation(conversationId: String): Boolean =
+        com.bitchat.android.nostr.GeohashAliasRegistry.contains(conversationId)
 
     private fun canSendViaNostr(peerID: String): Boolean {
         return try {
