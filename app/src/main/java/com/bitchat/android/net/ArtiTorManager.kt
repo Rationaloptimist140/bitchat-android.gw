@@ -332,7 +332,7 @@ class ArtiTorManager private constructor() {
         } catch (_: Throwable) {
         }
         try {
-            com.bitchat.android.nostr.NostrRelayManager.shared.resetAllConnections()
+            com.bitchat.android.nostr.NostrRelayManager.all().forEach { it.resetAllConnections() }
         } catch (_: Throwable) {
         }
     }

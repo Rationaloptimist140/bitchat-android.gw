@@ -1009,18 +1009,15 @@ class ChatViewModel(
                         getApplication(),
                         mesh
                     )
-                    val route = router.sendPrivate(
+                    // Status advances only on transport evidence: relay acceptance (Sent) or
+                    // the recipient's authenticated receipt (Delivered/Read). Choosing a route
+                    // is not evidence that anything left the device.
+                    router.sendPrivate(
                         messageContent,
                         peerID,
                         recipientNicknameParam,
                         messageId
                     )
-                    if (route == com.bitchat.android.services.MessageRouter.RouteResult.NOSTR) {
-                        messageManager.updateMessageDeliveryStatus(
-                            messageId,
-                            com.bitchat.android.model.DeliveryStatus.Sent
-                        )
-                    }
                 }
                 onAccepted(accepted)
             }

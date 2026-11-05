@@ -2,7 +2,11 @@ package com.bitchat.android.nostr
 
 import android.util.Log
 import com.bitchat.android.geohash.LiveLocationPrivacyGate
+import kotlinx.coroutines.channels.BufferOverflow
+import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharedFlow
+import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.collectLatest
@@ -19,14 +23,49 @@ import java.util.concurrent.atomic.AtomicBoolean
  * Manages WebSocket connections to Nostr relays
  * Compatible with iOS implementation with Android-specific optimizations
  */
-class NostrRelayManager private constructor() {
+class NostrRelayManager private constructor(
+    /** Logical traffic class carried by this manager's sockets (see [privateMessaging]). */
+    val purpose: String
+) {
+    /** Location-purpose manager; kept for reflective construction in tests. */
+    private constructor() : this(PURPOSE_LOCATION)
     
     companion object {
+        const val PURPOSE_LOCATION = "location"
+        const val PURPOSE_PRIVATE_MESSAGING = "private-messaging"
+
+        /**
+         * Relay manager for public and location-scoped traffic: geohash channels, presence,
+         * location notes and geohash-identity DMs.
+         */
         @JvmStatic
-        val shared = NostrRelayManager()
+        val shared = NostrRelayManager(PURPOSE_LOCATION)
+
+        /**
+         * Dedicated relay manager for account-identity private messaging: gift-wrapped DMs,
+         * delivery/read receipts, favourite notifications and the account DM subscription.
+         *
+         * It uses separate WebSocket connections and only the default DM relays, so a relay
+         * chosen because it is near the user's geohash never receives the account npub
+         * subscription or DMs, and a relay that serves both purposes cannot link them on one
+         * connection.
+         */
+        @JvmStatic
+        val privateMessaging = NostrRelayManager(PURPOSE_PRIVATE_MESSAGING)
+
+        fun privateMessaging(context: android.content.Context): NostrRelayManager {
+            privateMessaging.appContext = context.applicationContext
+            return privateMessaging
+        }
+
+        /** All relay managers, for process-wide lifecycle operations (Tor reset, shutdown, panic). */
+        fun all(): List<NostrRelayManager> = listOf(shared, privateMessaging)
         
         private const val TAG = "NostrRelayManager"
         private const val MAX_QUEUED_EVENTS = 500
+        private const val ACK_SWEEP_INTERVAL_MS = 5_000L
+        private const val ACK_TIMEOUT_DIRECT_MS = 20_000L
+        private const val ACK_TIMEOUT_TOR_MS = 40_000L
         const val OWNER_LEGACY = "legacy"
         const val OWNER_BACKGROUND = "background"
         
@@ -56,6 +95,9 @@ class NostrRelayManager private constructor() {
         }
 
         fun defaultRelays(): List<String> = DEFAULT_RELAYS
+
+        /** Relays that carry account private messages. Never includes geohash-selected relays. */
+        fun privateMessagingRelays(): List<String> = DEFAULT_RELAYS
     }
     
     /**
@@ -116,6 +158,25 @@ class NostrRelayManager private constructor() {
     
     // Bounded per-relay delivery queue for reconnect reliability.
     private val messageQueue = NostrPendingEventQueue(MAX_QUEUED_EVENTS)
+
+    /** A relay's verdict on an event this manager published (from its `OK` frame). */
+    internal data class PublishOutcome(
+        val eventId: String,
+        val relayUrl: String,
+        val kind: NostrPendingEventQueue.ResponseKind,
+        /** Machine-readable NIP-01 prefix only (for example "rate-limited"); never relay free text. */
+        val reasonPrefix: String?
+    )
+
+    private val _publishOutcomes = MutableSharedFlow<PublishOutcome>(
+        extraBufferCapacity = 512,
+        onBufferOverflow = BufferOverflow.DROP_OLDEST
+    )
+
+    /** Relay acceptance evidence. A local socket write is never reported here. */
+    internal val publishOutcomes: SharedFlow<PublishOutcome> = _publishOutcomes.asSharedFlow()
+
+    private var acknowledgementSweepJob: Job? = null
     
     // Coroutine scope for background operations
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
@@ -150,6 +211,10 @@ class NostrRelayManager private constructor() {
         includeDefaults: Boolean = false,
         liveLocationToken: Long? = null
     ) {
+        if (purpose == PURPOSE_PRIVATE_MESSAGING) {
+            Log.w(TAG, "Refusing geohash relays on the private-messaging relay manager")
+            return
+        }
         if (!isNetworkActionAllowed(liveLocationToken)) return
         try {
             val nearest = RelayDirectory.closestRelaysForGeohash(geohash, nRelays)
@@ -185,6 +250,12 @@ class NostrRelayManager private constructor() {
      * picker's worldwide activity sweep. Pair with [releaseRelays].
      */
     fun connectToRelays(relayUrls: Collection<String>) {
+        if (purpose == PURPOSE_PRIVATE_MESSAGING &&
+            relayUrls.any { it !in privateMessagingRelays() }
+        ) {
+            Log.w(TAG, "Refusing non-DM relays on the private-messaging relay manager")
+            return
+        }
         val urls = relayUrls.filter { it.isNotBlank() }.toSet()
         if (urls.isEmpty()) return
         // A relay held only for a live-location channel keeps its live gating.
@@ -453,6 +524,7 @@ class NostrRelayManager private constructor() {
         
         // Start periodic subscription validation
         startSubscriptionValidation()
+        startAcknowledgementSweep()
     }
     
     /**
@@ -464,6 +536,8 @@ class NostrRelayManager private constructor() {
 
         // Stop subscription validation
         stopSubscriptionValidation()
+        acknowledgementSweepJob?.cancel()
+        acknowledgementSweepJob = null
         reconnectJobs.values.forEach(Job::cancel)
         reconnectJobs.clear()
         liveLocationConnectionJobs.forEach(Job::cancel)
@@ -510,7 +584,8 @@ class NostrRelayManager private constructor() {
                     val webSocket = connections[relayUrl]
                     if (webSocket != null) {
                         if (sendToRelay(event, webSocket, relayUrl, liveLocationToken)) {
-                            messageQueue.markDelivered(queueId, relayUrl)
+                            // Buffered on the socket only; acceptance arrives as an OK frame.
+                            messageQueue.markWritten(queueId, relayUrl)
                         }
                     }
                 }
@@ -956,6 +1031,55 @@ class NostrRelayManager private constructor() {
         }
     }
 
+    /** Writes every delivery that is due for [relayUrl] to [webSocket]. */
+    private fun flushPendingDeliveries(relayUrl: String, webSocket: WebSocket) {
+        messageQueue.pendingForRelay(relayUrl)
+            .filter { isNetworkActionAllowed(it.liveLocationToken) }
+            .forEach { delivery ->
+                if (sendToRelay(delivery.event, webSocket, relayUrl, delivery.liveLocationToken)) {
+                    messageQueue.markWritten(delivery.queueId, relayUrl)
+                }
+            }
+    }
+
+    /**
+     * Periodically returns unacknowledged writes to pending and resends due deliveries on open
+     * sockets, so a lost frame or a retryable rejection is retried without waiting for a
+     * reconnect.
+     */
+    private fun startAcknowledgementSweep() {
+        if (acknowledgementSweepJob?.isActive == true) return
+        acknowledgementSweepJob = scope.launch {
+            while (isActive && desiredConnected.get()) {
+                delay(ACK_SWEEP_INTERVAL_MS)
+                runCatching { sweepAcknowledgements() }
+                    .onFailure { Log.w(TAG, "Acknowledgement sweep failed") }
+            }
+        }
+    }
+
+    internal fun sweepAcknowledgements() {
+        messageQueue.expireUnacknowledged(acknowledgementTimeoutMs())
+        messageQueue.relaysWithDueWork().forEach { relayUrl ->
+            connections[relayUrl]?.let { flushPendingDeliveries(relayUrl, it) }
+        }
+    }
+
+    /** Longer over Tor, where circuit latency routinely exceeds a direct round trip. */
+    private fun acknowledgementTimeoutMs(): Long {
+        val viaTor = runCatching {
+            com.bitchat.android.net.ArtiTorManager.getInstance().currentSocksAddress() != null
+        }.getOrDefault(false)
+        return if (viaTor) ACK_TIMEOUT_TOR_MS else ACK_TIMEOUT_DIRECT_MS
+    }
+
+    @androidx.annotation.VisibleForTesting
+    internal fun pendingDeliveryCountForTest(): Int = messageQueue.size()
+
+    /** Feeds a raw relay frame through the production ingress path (tests only). */
+    @androidx.annotation.VisibleForTesting
+    internal fun handleRelayFrameForTest(message: String, relayUrl: String) = handleMessage(message, relayUrl)
+
     private fun handleMessage(message: String, relayUrl: String) {
         try {
             val jsonElement = JsonParser.parseString(message)
@@ -979,7 +1103,8 @@ class NostrRelayManager private constructor() {
                         ?: return
                     if (!isNetworkActionAllowed(subscriptionInfo.liveLocationToken)) return
                     subscriptionInfo.let { subInfo ->
-                        val matches = try { subInfo.filter.matches(response.event) } catch (e: Exception) { true }
+                        // Fail closed: an event that cannot be evaluated against the filter is dropped.
+                        val matches = try { subInfo.filter.matches(response.event) } catch (e: Exception) { false }
                         if (!matches) {
                             // Do NOT call deduplicator here to allow the correct subscription to process it later
                             return
@@ -988,6 +1113,14 @@ class NostrRelayManager private constructor() {
 
                     if (subscriptionInfo.observeOnly) {
                         messageHandlers[response.subscriptionId]?.invoke(response.event)
+                        return
+                    }
+
+                    // VERIFY BEFORE DEDUPLICATION: recompute the id and check the signature first.
+                    // Remembering an unverified id would let a relay that serves a forged or
+                    // corrupted copy first suppress the genuine event delivered by other relays.
+                    if (!response.event.isValidSignature()) {
+                        Log.w(TAG, "Dropping relay event with invalid id or signature")
                         return
                     }
 
@@ -1014,10 +1147,19 @@ class NostrRelayManager private constructor() {
 
                 is NostrResponse.Ok -> {
                     val wasGiftWrap = pendingGiftWrapIDs.remove(response.eventId)
+                    val kind = messageQueue.onRelayResponse(
+                        response.eventId,
+                        relayUrl,
+                        response.accepted,
+                        response.message
+                    ) ?: NostrPendingEventQueue.classify(response.accepted, response.message)
+                    val reasonPrefix = response.message?.substringBefore(':', missingDelimiterValue = "")
+                        ?.takeIf { it.isNotBlank() && it.length <= 32 && it.all { c -> c.isLetter() || c == '-' } }
                     if (!response.accepted) {
                         val level = if (wasGiftWrap) Log.WARN else Log.ERROR
-                        Log.println(level, TAG, "Event rejected by relay: ${response.message ?: "no reason"}")
+                        Log.println(level, TAG, "Event not accepted by relay (${reasonPrefix ?: "no reason"}, $kind)")
                     }
+                    _publishOutcomes.tryEmit(PublishOutcome(response.eventId, relayUrl, kind, reasonPrefix))
                 }
 
                 is NostrResponse.Notice -> {
@@ -1043,6 +1185,8 @@ class NostrRelayManager private constructor() {
         // newer socket or schedule a reconnect after a controlled disconnect/privacy revocation.
         if (!connections.remove(relayUrl, webSocket)) return
         subscriptions.remove(relayUrl)
+        // Frames written but not acknowledged may have been lost with the socket.
+        messageQueue.requeueWritten(relayUrl)
         handleCurrentDisconnection(relayUrl, error, liveLocationToken)
     }
 
@@ -1188,19 +1332,7 @@ class NostrRelayManager private constructor() {
             restoreSubscriptionsForRelay(relayUrl, webSocket)
             
             // Process only events still pending for this relay, outside the queue lock.
-            val queuedForRelay = messageQueue.pendingForRelay(relayUrl)
-                .filter { isNetworkActionAllowed(it.liveLocationToken) }
-            queuedForRelay.forEach { delivery ->
-                if (sendToRelay(
-                        delivery.event,
-                        webSocket,
-                        relayUrl,
-                        delivery.liveLocationToken
-                    )
-                ) {
-                    messageQueue.markDelivered(delivery.queueId, relayUrl)
-                }
-            }
+            flushPendingDeliveries(relayUrl, webSocket)
         }
         
         override fun onMessage(webSocket: WebSocket, text: String) {

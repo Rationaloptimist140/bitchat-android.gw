@@ -176,6 +176,18 @@ class ConversationRepository internal constructor(
         false
     }
 
+    internal suspend fun isOutgoingMessageInConversationAndWait(
+        messageID: String,
+        counterpartIds: Set<String>
+    ): Boolean = withContext(dispatcher) {
+        try {
+            database.isOutgoingMessageInConversation(messageID, counterpartIds)
+        } catch (error: Exception) {
+            Log.w(TAG, "Unable to verify receipt binding")
+            false
+        }
+    }
+
     fun updateDeliveryStatus(messageID: String, status: DeliveryStatus) {
         scope.launch {
             try {
@@ -332,6 +344,9 @@ class ConversationRepository internal constructor(
             paths
         )
     }
+
+    internal suspend fun loadDeliveryStatusForTest(messageID: String): DeliveryStatus? =
+        withContext(dispatcher) { database.loadDeliveryStatus(messageID) }
 
     internal fun closeForTest() {
         database.close()
@@ -856,6 +871,46 @@ internal class ConversationDatabase(
             inserted = messageInserted,
             orphanedMediaPaths = orphanedMediaPaths
         )
+    }
+
+    /**
+     * True only when [messageID] is a message in the conversation identified by one of
+     * [counterpartIds] (directly or through a recorded alias) and was not authored by that
+     * counterpart. Delivery and read receipts are applied only when this holds, so a peer can
+     * never advance the status of a message that belongs to a different conversation.
+     */
+    fun loadDeliveryStatus(messageID: String): DeliveryStatus? =
+        readableDatabase.rawQuery(
+            "SELECT ${MESSAGE_COLUMNS.joinToString(",")} FROM private_messages WHERE message_id = ?",
+            arrayOf(messageID)
+        ).use { cursor -> if (cursor.moveToFirst()) cursor.toMessage().deliveryStatus else null }
+
+    fun isOutgoingMessageInConversation(messageID: String, counterpartIds: Set<String>): Boolean {
+        val candidates = counterpartIds.map { it.trim() }.filter { it.isNotEmpty() }.toSet()
+        if (candidates.isEmpty()) return false
+        val db = readableDatabase
+        var conversationId: String? = null
+        val message = db.rawQuery(
+            "SELECT ${MESSAGE_COLUMNS.joinToString(",")} FROM private_messages WHERE message_id = ?",
+            arrayOf(messageID)
+        ).use { cursor ->
+            if (!cursor.moveToFirst()) return false
+            conversationId = cursor.getString(cursor.getColumnIndexOrThrow("conversation_id"))
+            cursor.toMessage()
+        }
+        val conversation = conversationId ?: return false
+        val inConversation = candidates.any { it.equals(conversation, ignoreCase = true) } ||
+            candidates.any { alias ->
+                db.longForQuery(
+                    "SELECT COUNT(*) FROM conversation_aliases WHERE alias = ? AND conversation_id = ?",
+                    arrayOf(alias, conversation)
+                ) > 0L
+            }
+        if (!inConversation) return false
+        val author = message.senderPeerID ?: return true
+        val authoredByCounterpart = author.equals(conversation, ignoreCase = true) ||
+            candidates.any { it.equals(author, ignoreCase = true) }
+        return !authoredByCounterpart
     }
 
     fun updateDeliveryStatus(messageID: String, status: DeliveryStatus) {

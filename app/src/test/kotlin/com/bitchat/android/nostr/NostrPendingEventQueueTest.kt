@@ -28,7 +28,7 @@ class NostrPendingEventQueueTest {
     }
 
     @Test
-    fun `duplicate event publishes retain independent delivery state`() {
+    fun `duplicate event publishes retain independent write state`() {
         val queue = NostrPendingEventQueue(capacity = 4)
         val signedEvent = event("same")
         val firstId = requireNotNull(
@@ -39,7 +39,8 @@ class NostrPendingEventQueueTest {
         )
         assertNotEquals(firstId, secondId)
 
-        queue.markDelivered(firstId, "relay-a")
+        // Writing one publish to relay-a leaves the other publish pending for relay-a.
+        queue.markWritten(firstId, "relay-a")
 
         assertEquals(
             listOf(secondId),
@@ -50,8 +51,10 @@ class NostrPendingEventQueueTest {
             queue.pendingForRelay("relay-b").map { it.queueId }
         )
 
-        queue.markDelivered(firstId, "relay-b")
+        // A relay OK is keyed by event id: relay-a now stores the event for both publishes.
+        queue.onRelayResponse(signedEvent.id, "relay-a", accepted = true, message = null)
         assertEquals(1, queue.size())
+        assertEquals(emptyList<Long>(), queue.pendingForRelay("relay-a").map { it.queueId })
     }
 
     @Test

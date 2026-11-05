@@ -171,7 +171,7 @@ class NostrTestManager(private val context: Context) {
         
         // Subscribe to a test geohash
         nostrClient.subscribeToGeohash("u4pru") { content, senderPubkey, nickname, timestamp ->
-            Log.d(TAG, "📥 Received test geohash message from ${senderPubkey.take(16)}...: $content")
+            Log.d(TAG, "📥 Received test geohash message (${content.length} chars)")
             messageReceived = true
         }
         

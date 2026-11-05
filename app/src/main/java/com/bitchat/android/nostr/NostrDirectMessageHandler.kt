@@ -11,6 +11,7 @@ import com.bitchat.android.model.NoisePayload
 import com.bitchat.android.model.NoisePayloadType
 import com.bitchat.android.model.PrivateMessagePacket
 import com.bitchat.android.protocol.BitchatPacket
+import com.bitchat.android.services.AppStateStore
 import com.bitchat.android.services.ContactDirectory
 import com.bitchat.android.services.ContactIdentityResolver
 import com.bitchat.android.services.SeenMessageStore
@@ -33,32 +34,37 @@ class NostrDirectMessageHandler(
     private val dataManager: com.bitchat.android.ui.DataManager,
     private val seenStoreProvider: () -> SeenMessageStore = {
         SeenMessageStore.getInstance(application)
-    }
+    },
+    /** Confirms a receipt targets an outgoing message in the sender's conversation. */
+    private val receiptBinding: suspend (messageID: String, counterpartIds: Set<String>) -> Boolean =
+        AppStateStore::isOutgoingMessageInConversation
 ) {
     companion object { private const val TAG = "NostrDirectMessageHandler" }
 
     private val seenStore by lazy(seenStoreProvider)
 
-    // Simple event deduplication
+    // Gift-wrap deduplication. Only events that decrypted and authenticated successfully are
+    // remembered, so a forged or corrupted copy that arrives first cannot suppress the genuine
+    // event. Access is serialized by the processor's single-threaded scope.
     private val processedIds = ArrayDeque<String>()
     private val seen = HashSet<String>()
     private val max = 2000
 
-    private fun dedupe(id: String): Boolean {
-        if (seen.contains(id)) return true
-        seen.add(id)
+    private fun alreadyProcessed(id: String): Boolean = seen.contains(id)
+
+    private fun markProcessed(id: String) {
+        if (!seen.add(id)) return
         processedIds.addLast(id)
         if (processedIds.size > max) {
             val old = processedIds.removeFirst()
             seen.remove(old)
         }
-        return false
     }
 
     fun onGiftWrap(giftWrap: NostrEvent, geohash: String, identity: NostrIdentity) {
         scope.launch {
             try {
-                if (dedupe(giftWrap.id)) return@launch
+                if (alreadyProcessed(giftWrap.id)) return@launch
 
                 val messageAge = System.currentTimeMillis() / 1000 - giftWrap.createdAt
                 if (messageAge > 173700) return@launch // 48 hours + 15 mins
@@ -68,6 +74,9 @@ class NostrDirectMessageHandler(
                     Log.w(TAG, "Failed to decrypt Nostr message")
                     return@launch
                 }
+                // The seal signature and seal/rumor pubkey binding are verified by
+                // decryptPrivateMessage; only now is the event id trustworthy enough to remember.
+                markProcessed(giftWrap.id)
 
                 val (content, rawSenderPubkey, rumorTimestamp) = decryptResult
                 val senderPubkey = rawSenderPubkey.lowercase()
@@ -108,7 +117,7 @@ class NostrDirectMessageHandler(
                 val senderNickname = repo.displayNameForNostrPubkeyUI(senderPubkey)
                 val conversationID = ContactDirectory.canonicalConversationId(convKey)
 
-                processNoisePayload(noisePayload, conversationID, senderNickname, messageTimestamp, senderPubkey, identity)
+                processNoisePayload(noisePayload, conversationID, senderNickname, messageTimestamp, senderPubkey, identity, geohash.isEmpty())
 
             } catch (e: Exception) {
                 Log.e(TAG, "onGiftWrap error: ${e.message}")
@@ -122,7 +131,8 @@ class NostrDirectMessageHandler(
         senderNickname: String,
         timestamp: Date,
         senderPubkey: String,
-        recipientIdentity: NostrIdentity
+        recipientIdentity: NostrIdentity,
+        isAccountDm: Boolean = false
     ) {
         when (payload.type) {
             NoisePayloadType.PRIVATE_MESSAGE -> {
@@ -142,7 +152,7 @@ class NostrDirectMessageHandler(
                     if (!admitted) return
                     if (!seenStore.hasDelivered(pm.messageID)) {
                         val nostrTransport = NostrTransport.getInstance(application)
-                        nostrTransport.sendDeliveryAckGeohash(pm.messageID, senderPubkey, recipientIdentity)
+                        nostrTransport.sendDeliveryAckGeohash(pm.messageID, senderPubkey, recipientIdentity, privateChannel = isAccountDm)
                         seenStore.markDelivered(pm.messageID)
                     }
                     return
@@ -175,19 +185,23 @@ class NostrDirectMessageHandler(
 
                 if (!seenStore.hasDelivered(pm.messageID)) {
                     val nostrTransport = NostrTransport.getInstance(application)
-                    nostrTransport.sendDeliveryAckGeohash(pm.messageID, senderPubkey, recipientIdentity)
+                    nostrTransport.sendDeliveryAckGeohash(pm.messageID, senderPubkey, recipientIdentity, privateChannel = isAccountDm)
                     seenStore.markDelivered(pm.messageID)
                 }
 
                 if (isViewing && !suppressUnread) {
                     val nostrTransport = NostrTransport.getInstance(application)
-                    nostrTransport.sendReadReceiptGeohash(pm.messageID, senderPubkey, recipientIdentity)
+                    nostrTransport.sendReadReceiptGeohash(pm.messageID, senderPubkey, recipientIdentity, privateChannel = isAccountDm)
                     seenStore.markReadLocally(pm.messageID)
                     seenStore.markReadReceiptSent(pm.messageID)
                 }
             }
             NoisePayloadType.DELIVERED -> {
                 val messageId = String(payload.data, Charsets.UTF_8)
+                if (!receiptBinding(messageId, receiptCounterpartIds(conversationID, senderPubkey))) {
+                    Log.w(TAG, "Ignoring delivery receipt not bound to its conversation")
+                    return
+                }
                 withContext(Dispatchers.Main) {
                     updateDeliveryStatus(
                         messageId,
@@ -197,6 +211,10 @@ class NostrDirectMessageHandler(
             }
             NoisePayloadType.READ_RECEIPT -> {
                 val messageId = String(payload.data, Charsets.UTF_8)
+                if (!receiptBinding(messageId, receiptCounterpartIds(conversationID, senderPubkey))) {
+                    Log.w(TAG, "Ignoring read receipt not bound to its conversation")
+                    return
+                }
                 withContext(Dispatchers.Main) {
                     updateDeliveryStatus(
                         messageId,
@@ -255,17 +273,22 @@ class NostrDirectMessageHandler(
         senderPubkey: String
     ): Boolean {
         return try {
-            val senderNpub = control.npub ?: ContactIdentityResolver.npubFromHex(senderPubkey)
-            val noiseKey = senderNpub?.let { FavoritesPersistenceService.shared.findNoiseKey(it) }
-                ?: FavoritesPersistenceService.shared.findNoiseKey(senderPubkey)
+            // Identity comes only from the authenticated seal key. A claimed npub inside the
+            // message must match it; otherwise the message could change another contact's state.
+            val claimedHex = control.npub?.let { ContactIdentityResolver.nostrPubkeyHex(it) }
+            if (control.npub != null && claimedHex?.lowercase() != senderPubkey.lowercase()) {
+                Log.w(TAG, "Rejecting favorite notification whose claimed key differs from its sender")
+                return false
+            }
+            val noiseKey = FavoritesPersistenceService.shared.findNoiseKey(senderPubkey)
 
             if (noiseKey == null) {
-                Log.w(TAG, "Favorite notification from Nostr sender without known Noise key: ${senderPubkey.take(16)}...")
+                Log.w(TAG, "Favorite notification from Nostr sender without known Noise key")
                 return false
             }
 
+            // The Nostr key binding itself only changes over an authenticated mesh session.
             FavoritesPersistenceService.shared.updatePeerFavoritedUs(noiseKey, control.isFavorite)
-            senderNpub?.let { FavoritesPersistenceService.shared.updateNostrPublicKey(noiseKey, it) }
             val targetConversationID = ContactDirectory.canonicalConversationId(conversationID)
 
             val relationship = FavoritesPersistenceService.shared.getFavoriteStatus(noiseKey)
@@ -303,6 +326,17 @@ class NostrDirectMessageHandler(
             Log.w(TAG, "Failed to handle Nostr favorite notification: ${e.message}")
             false
         }
+    }
+
+    /** Conversation ids for a receipt sender, derived only from its authenticated key. */
+    private fun receiptCounterpartIds(conversationID: String, senderPubkey: String): Set<String> {
+        val noiseKey = try {
+            FavoritesPersistenceService.shared.findNoiseKey(senderPubkey)
+        } catch (_: Exception) {
+            null
+        }
+        return ContactDirectory.receiptCounterpartIds("nostr_${senderPubkey.take(16)}", noiseKey) +
+            ContactDirectory.receiptCounterpartIds(conversationID)
     }
 
     private fun base64URLDecode(input: String): ByteArray? {

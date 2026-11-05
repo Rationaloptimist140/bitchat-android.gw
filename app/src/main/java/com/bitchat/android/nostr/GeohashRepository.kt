@@ -25,7 +25,12 @@ class GeohashRepository(
         private const val PRESENCE_REFRESH_INTERVAL_MS = 100L
     }
 
-    private var presenceRefreshJob: Job? = null
+    @Volatile private var presenceRefreshJob: Job? = null
+    // Lock-free coalescing flag. The participant-store collector calls schedulePresenceRefresh()
+    // inline while the shared store may be publishing under its own monitor; taking this
+    // repository's monitor there caused a lock-order deadlock between repositories sharing the
+    // store (one held repository -> store, the other store -> repository).
+    private val presenceRefreshPending = java.util.concurrent.atomic.AtomicBoolean(false)
     private val geohashParticipants get() = participantStore.snapshots.value.participants
     private val geoNicknames get() = participantStore.snapshots.value.nicknames
 
@@ -97,6 +102,7 @@ class GeohashRepository(
     fun clearAll() {
         presenceRefreshJob?.cancel()
         presenceRefreshJob = null
+        presenceRefreshPending.set(false)
         participantStore.clear()
         nostrKeyMapping.clear()
         state.setGeohashPeople(emptyList())
@@ -150,15 +156,19 @@ class GeohashRepository(
     }
 
     /** Coalesce relay bursts and shared-store updates into one UI snapshot per interval. */
-    @Synchronized
     private fun schedulePresenceRefresh() {
-        if (presenceRefreshJob?.isActive == true) return
+        if (!presenceRefreshPending.compareAndSet(false, true)) return
         presenceRefreshJob = scope.launch {
-            delay(PRESENCE_REFRESH_INTERVAL_MS)
-            synchronized(this@GeohashRepository) {
-                presenceRefreshJob = null
-                refreshGeohashPeople()
-                updateReactiveParticipantCounts()
+            try {
+                delay(PRESENCE_REFRESH_INTERVAL_MS)
+                // Clear before refreshing so updates arriving during the refresh schedule another.
+                presenceRefreshPending.set(false)
+                synchronized(this@GeohashRepository) {
+                    refreshGeohashPeople()
+                    updateReactiveParticipantCounts()
+                }
+            } finally {
+                presenceRefreshPending.compareAndSet(true, false)
             }
         }
     }

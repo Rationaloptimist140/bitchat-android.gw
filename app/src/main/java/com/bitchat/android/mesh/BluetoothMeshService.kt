@@ -514,25 +514,29 @@ class BluetoothMeshService(private val context: Context) : TransportBridgeServic
             }
             
             override fun onDeliveryAckReceived(messageID: String, peerID: String) {
-                // Status events can arrive while MainActivity has detached the UI delegate.
-                // Persist first so the next UI collector observes the advancement.
-                try {
-                    com.bitchat.android.services.AppStateStore.updatePrivateMessageStatus(
-                        messageID,
-                        com.bitchat.android.model.DeliveryStatus.Delivered(peerID, Date())
-                    )
-                } catch (_: Exception) { }
-                delegate?.didReceiveDeliveryAck(messageID, peerID)
+                // Receipts arrive over the peer's authenticated Noise session. Apply them only to
+                // outgoing messages in that peer's conversation; persist before notifying the UI.
+                val counterpart = com.bitchat.android.services.ContactDirectory.receiptCounterpartIds(
+                    peerID,
+                    this@BluetoothMeshService.getPeerInfo(peerID)?.noisePublicKey
+                )
+                com.bitchat.android.services.AppStateStore.updatePrivateMessageStatusFromCounterpart(
+                    messageID,
+                    counterpart,
+                    com.bitchat.android.model.DeliveryStatus.Delivered(peerID, Date())
+                ) { delegate?.didReceiveDeliveryAck(messageID, peerID) }
             }
-            
+
             override fun onReadReceiptReceived(messageID: String, peerID: String) {
-                try {
-                    com.bitchat.android.services.AppStateStore.updatePrivateMessageStatus(
-                        messageID,
-                        com.bitchat.android.model.DeliveryStatus.Read(peerID, Date())
-                    )
-                } catch (_: Exception) { }
-                delegate?.didReceiveReadReceipt(messageID, peerID)
+                val counterpart = com.bitchat.android.services.ContactDirectory.receiptCounterpartIds(
+                    peerID,
+                    this@BluetoothMeshService.getPeerInfo(peerID)?.noisePublicKey
+                )
+                com.bitchat.android.services.AppStateStore.updatePrivateMessageStatusFromCounterpart(
+                    messageID,
+                    counterpart,
+                    com.bitchat.android.model.DeliveryStatus.Read(peerID, Date())
+                ) { delegate?.didReceiveReadReceipt(messageID, peerID) }
             }
 
             override fun onVerifyChallengeReceived(peerID: String, payload: ByteArray, timestampMs: Long) {

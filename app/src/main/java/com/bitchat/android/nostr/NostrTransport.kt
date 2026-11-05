@@ -4,6 +4,8 @@ import android.content.Context
 import android.util.Log
 import com.bitchat.android.favorites.FavoriteControlMessage
 import com.bitchat.android.model.ReadReceipt
+import com.bitchat.android.model.DeliveryStatus
+import com.bitchat.android.services.AppStateStore
 import com.bitchat.android.model.NoisePayloadType
 import com.bitchat.android.services.ContactDirectory
 import com.bitchat.android.services.ContactIdentityResolver
@@ -41,6 +43,15 @@ class NostrTransport(
         val peerID: String
     )
     
+    /** Private-message gift wraps awaiting relay acceptance: event id -> publish state. */
+    private class TrackedPublish(
+        val messageID: String,
+        val remainingRelays: MutableSet<String>,
+        @Volatile var accepted: Boolean = false
+    )
+
+    private val trackedPublishes = java.util.concurrent.ConcurrentHashMap<String, TrackedPublish>()
+
     private val readQueue = ConcurrentLinkedQueue<QueuedRead>()
     private var isSendingReadAcks = false
     private val transportScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
@@ -48,6 +59,42 @@ class NostrTransport(
     // MARK: - Transport Interface Methods
     
     val myPeerID: String get() = senderPeerID
+
+    init {
+        // Relay acceptance is the only evidence that moves a private message to Sent.
+        transportScope.launch {
+            NostrRelayManager.privateMessaging.publishOutcomes.collect { onPublishOutcome(it) }
+        }
+    }
+
+    /** Registers a published private-message event so relay `OK` frames can update its status. */
+    internal fun trackPublishedMessage(eventId: String, messageID: String, relayUrls: Collection<String>) {
+        trackedPublishes[eventId] = TrackedPublish(messageID, relayUrls.toMutableSet())
+    }
+
+    internal fun onPublishOutcome(outcome: NostrRelayManager.PublishOutcome) {
+        val tracked = trackedPublishes[outcome.eventId] ?: return
+        when (outcome.kind) {
+            NostrPendingEventQueue.ResponseKind.ACCEPTED -> {
+                tracked.accepted = true
+                trackedPublishes.remove(outcome.eventId)
+                AppStateStore.updatePrivateMessageStatus(tracked.messageID, DeliveryStatus.Sent)
+            }
+            NostrPendingEventQueue.ResponseKind.PERMANENT -> {
+                synchronized(tracked) { tracked.remainingRelays.remove(outcome.relayUrl) }
+                if (!tracked.accepted && synchronized(tracked) { tracked.remainingRelays.isEmpty() }) {
+                    trackedPublishes.remove(outcome.eventId)
+                    markUnsendable(tracked.messageID, "Not accepted by any relay")
+                }
+            }
+            NostrPendingEventQueue.ResponseKind.RETRYABLE -> Unit // the relay queue retries
+        }
+    }
+
+    /** A private message that cannot be sent over Nostr is shown as failed, never as sent. */
+    private fun markUnsendable(messageID: String, reason: String) {
+        AppStateStore.updatePrivateMessageStatus(messageID, DeliveryStatus.Failed(reason))
+    }
     
     fun sendPrivateMessage(
         content: String,
@@ -60,19 +107,22 @@ class NostrTransport(
                 val recipientNostrPubkey = resolveNostrPublicKey(to)
                 
                 if (recipientNostrPubkey == null) {
-                    Log.w(TAG, "No Nostr public key found for peerID: $to")
+                    Log.w(TAG, "No Nostr public key known for recipient")
+                    markUnsendable(messageID, "No internet route to this contact")
                     return@launch
                 }
                 
                 val senderIdentity = NostrIdentityBridge.getCurrentNostrIdentity(context)
                 if (senderIdentity == null) {
                     Log.e(TAG, "No Nostr identity available")
+                    markUnsendable(messageID, "Internet messaging identity unavailable")
                     return@launch
                 }
                 
                 val recipientHex = ContactIdentityResolver.nostrPubkeyHex(recipientNostrPubkey)
                 if (recipientHex == null) {
                     Log.e(TAG, "NostrTransport: recipient key is not a valid Nostr pubkey")
+                    markUnsendable(messageID, "No internet route to this contact")
                     return@launch
                 }
 
@@ -82,6 +132,7 @@ class NostrTransport(
                 } catch (_: Exception) { null }
                 if (recipientPeerIDForEmbed.isNullOrBlank()) {
                     Log.e(TAG, "NostrTransport: no peerID stored for recipient npub; cannot embed PM")
+                    markUnsendable(messageID, "No internet route to this contact")
                     return@launch
                 }
                 val embedded = NostrEmbeddedBitChat.encodePMForNostr(
@@ -94,6 +145,7 @@ class NostrTransport(
                 
                 if (embedded == null) {
                     Log.e(TAG, "NostrTransport: failed to embed PM packet")
+                    markUnsendable(messageID, "Message could not be prepared")
                     return@launch
                 }
                 
@@ -105,11 +157,14 @@ class NostrTransport(
                 
                 giftWraps.forEach { event ->
                     NostrRelayManager.registerPendingGiftWrap(event.id)
-                    NostrRelayManager.getInstance(context).sendEvent(event)
+                    // Track before publishing so an immediate OK cannot be missed.
+                    trackPublishedMessage(event.id, messageID, NostrRelayManager.privateMessagingRelays())
+                    NostrRelayManager.privateMessaging(context).sendEvent(event, NostrRelayManager.privateMessagingRelays())
                 }
 
             } catch (e: Exception) {
-                Log.e(TAG, "Failed to send private message via Nostr: ${e.message}")
+                Log.e(TAG, "Failed to send private message via Nostr: ${e.javaClass.simpleName}")
+                markUnsendable(messageID, "Message could not be prepared")
             }
         }
     }
@@ -179,7 +234,7 @@ class NostrTransport(
                 
                 giftWraps.forEach { event ->
                     NostrRelayManager.registerPendingGiftWrap(event.id)
-                    NostrRelayManager.getInstance(context).sendEvent(event)
+                    NostrRelayManager.privateMessaging(context).sendEvent(event, NostrRelayManager.privateMessagingRelays())
                 }
 
                 scheduleNextReadAck()
@@ -242,7 +297,7 @@ class NostrTransport(
                 
                 giftWraps.forEach { event ->
                     NostrRelayManager.registerPendingGiftWrap(event.id)
-                    NostrRelayManager.getInstance(context).sendEvent(event)
+                    NostrRelayManager.privateMessaging(context).sendEvent(event, NostrRelayManager.privateMessagingRelays())
                 }
 
             } catch (e: Exception) {
@@ -292,7 +347,7 @@ class NostrTransport(
                 
                 giftWraps.forEach { event ->
                     NostrRelayManager.registerPendingGiftWrap(event.id)
-                    NostrRelayManager.getInstance(context).sendEvent(event)
+                    NostrRelayManager.privateMessaging(context).sendEvent(event, NostrRelayManager.privateMessagingRelays())
                 }
 
             } catch (e: Exception) {
@@ -306,7 +361,8 @@ class NostrTransport(
     fun sendDeliveryAckGeohash(
         messageID: String,
         toRecipientHex: String,
-        fromIdentity: NostrIdentity
+        fromIdentity: NostrIdentity,
+        privateChannel: Boolean = false
     ) {
         transportScope.launch {
             try {
@@ -326,7 +382,7 @@ class NostrTransport(
                 // Register pending gift wrap for deduplication and send all
                 giftWraps.forEach { event ->
                     NostrRelayManager.registerPendingGiftWrap(event.id)
-                    NostrRelayManager.getInstance(context).sendEvent(event)
+                    relayManagerFor(privateChannel).sendEvent(event, relaysFor(privateChannel))
                 }
                 
             } catch (e: Exception) {
@@ -338,7 +394,8 @@ class NostrTransport(
     fun sendReadReceiptGeohash(
         messageID: String,
         toRecipientHex: String,
-        fromIdentity: NostrIdentity
+        fromIdentity: NostrIdentity,
+        privateChannel: Boolean = false
     ) {
         transportScope.launch {
             try {
@@ -358,7 +415,7 @@ class NostrTransport(
                 // Register pending gift wrap for deduplication and send all
                 giftWraps.forEach { event ->
                     NostrRelayManager.registerPendingGiftWrap(event.id)
-                    NostrRelayManager.getInstance(context).sendEvent(event)
+                    relayManagerFor(privateChannel).sendEvent(event, relaysFor(privateChannel))
                 }
                 
             } catch (e: Exception) {
@@ -428,6 +485,16 @@ class NostrTransport(
     /**
      * Resolve Nostr public key for a peer ID
      */
+    /**
+     * Account-identity receipts travel on the private-messaging relay manager; receipts for
+     * geohash-identity conversations stay with the location relay manager.
+     */
+    private fun relayManagerFor(privateChannel: Boolean): NostrRelayManager =
+        if (privateChannel) NostrRelayManager.privateMessaging(context) else NostrRelayManager.getInstance(context)
+
+    private fun relaysFor(privateChannel: Boolean): List<String>? =
+        if (privateChannel) NostrRelayManager.privateMessagingRelays() else null
+
     private fun resolveNostrPublicKey(peerID: String): String? {
         try {
             ContactDirectory.resolve(peerID).nostrPubkey?.let { return it }

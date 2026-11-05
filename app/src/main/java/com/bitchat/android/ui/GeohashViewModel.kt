@@ -127,7 +127,11 @@ class GeohashViewModel(
             false
         }
         NostrBackgroundRuntime.resetSubscriptions()
-        try { com.bitchat.android.nostr.NostrRelayManager.getInstance(getApplication()).clearAllOnPanic() } catch (_: Exception) {}
+        com.bitchat.android.nostr.NostrRelayManager.getInstance(getApplication())
+        com.bitchat.android.nostr.NostrRelayManager.privateMessaging(getApplication())
+        com.bitchat.android.nostr.NostrRelayManager.all().forEach { manager ->
+            try { manager.clearAllOnPanic() } catch (_: Exception) {}
+        }
         try { com.bitchat.android.nostr.LocationNotesManager.getInstance().stop() } catch (_: Exception) {}
         return identityCleared
     }

@@ -3,6 +3,10 @@ package com.bitchat.android.services
 import android.content.Context
 import com.bitchat.android.model.BitchatMessage
 import com.bitchat.android.model.DeliveryStatus
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -425,6 +429,54 @@ object AppStateStore {
         is DeliveryStatus.Delivered -> 4
         is DeliveryStatus.Read -> 5
         is DeliveryStatus.Failed -> 0
+    }
+
+    private val receiptScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+
+    /**
+     * Whether [messageID] is an outgoing message in the conversation of the counterpart
+     * identified by [counterpartIds]. Fails closed when the message is unknown.
+     */
+    suspend fun isOutgoingMessageInConversation(
+        messageID: String,
+        counterpartIds: Set<String>
+    ): Boolean {
+        conversationRepository?.let { repository ->
+            return repository.isOutgoingMessageInConversationAndWait(messageID, counterpartIds)
+        }
+        return isOutgoingMessageInMemory(messageID, counterpartIds)
+    }
+
+    private fun isOutgoingMessageInMemory(messageID: String, counterpartIds: Set<String>): Boolean {
+        val chats = _privateMessages.value
+        return counterpartIds.any { conversation ->
+            val message = chats.entries
+                .firstOrNull { it.key.equals(conversation, ignoreCase = true) }
+                ?.value?.firstOrNull { it.id == messageID }
+                ?: return@any false
+            val author = message.senderPeerID ?: return@any true
+            counterpartIds.none { it.equals(author, ignoreCase = true) }
+        }
+    }
+
+    /**
+     * Applies a delivery/read receipt only after confirming that the receipt came from the
+     * counterpart of the message's conversation. [onApplied] runs only when it was applied.
+     */
+    fun updatePrivateMessageStatusFromCounterpart(
+        messageID: String,
+        counterpartIds: Set<String>,
+        status: DeliveryStatus,
+        onApplied: (() -> Unit)? = null
+    ) {
+        receiptScope.launch {
+            if (isOutgoingMessageInConversation(messageID, counterpartIds)) {
+                updatePrivateMessageStatus(messageID, status)
+                onApplied?.invoke()
+            } else {
+                android.util.Log.w("AppStateStore", "Ignoring receipt not bound to its conversation")
+            }
+        }
     }
 
     fun updatePrivateMessageStatus(messageID: String, status: DeliveryStatus) {

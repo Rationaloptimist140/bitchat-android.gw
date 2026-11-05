@@ -63,6 +63,24 @@ object ContactDirectory {
         return value
     }
 
+    /**
+     * Conversation identifiers under which messages exchanged with a counterpart may be stored,
+     * derived only from authenticated identity: the transport peer ID, its canonical
+     * conversation, and the contact conversation of an authenticated Noise key.
+     */
+    fun receiptCounterpartIds(transportPeerID: String, authenticatedNoiseKey: ByteArray? = null): Set<String> =
+        buildSet {
+            val peer = transportPeerID.trim()
+            if (peer.isNotEmpty()) {
+                add(peer)
+                add(canonicalConversationId(peer))
+            }
+            authenticatedNoiseKey?.let { key ->
+                add(ContactIdentityResolver.noiseKeyHex(key))
+                add(ContactIdentityResolver.contactConversationIdForNoiseKey(key))
+            }
+        }
+
     fun resolve(peerOrConversationID: String): ContactResolution {
         val conversationID = canonicalConversationId(peerOrConversationID)
         val contactFingerprint = ContactIdentityResolver.fingerprintFromContactConversationId(conversationID)

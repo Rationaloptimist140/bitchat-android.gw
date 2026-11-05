@@ -41,6 +41,8 @@ object NostrBackgroundRuntime {
     @Volatile private var conversationGeohash: String? = null
     private lateinit var application: Application
     private lateinit var subscriptions: NostrSubscriptionManager
+    /** Account DM subscription on the dedicated private-messaging relay manager. */
+    private lateinit var privateSubscriptions: NostrSubscriptionManager
     private lateinit var locationChannels: LocationChannelManager
     private lateinit var eventProcessor: NostrBackgroundEventProcessor
 
@@ -54,11 +56,18 @@ object NostrBackgroundRuntime {
                 app,
                 owner = NostrRelayManager.OWNER_BACKGROUND
             )
+            privateSubscriptions = NostrSubscriptionManager(
+                app,
+                owner = NostrRelayManager.OWNER_BACKGROUND,
+                relayManagerProvider = { NostrRelayManager.privateMessaging(it) },
+                giftWrapRelays = NostrRelayManager.privateMessagingRelays()
+            )
             // Publish readiness only after every process-owned dependency is available.
             initialized = true
         }
 
         subscriptions.connect()
+        privateSubscriptions.connect()
         subscribeAccountDm()
         observeSelectedChannel()
         startPresenceScheduler()
@@ -67,6 +76,7 @@ object NostrBackgroundRuntime {
     fun resetSubscriptions() {
         if (!initialized) return
         subscriptions.unsubscribeAllOwned()
+        privateSubscriptions.unsubscribeAllOwned()
         scope.launch {
             // Let CLOSE frames be queued before replacing the deterministic IDs.
             delay(100)
@@ -96,7 +106,7 @@ object NostrBackgroundRuntime {
 
     private fun subscribeAccountDm() {
         val identity = NostrIdentityBridge.getCurrentNostrIdentity(application) ?: return
-        subscriptions.subscribeGiftWraps(
+        privateSubscriptions.subscribeGiftWraps(
             pubkey = identity.publicKeyHex,
             sinceMs = System.currentTimeMillis() - 172_800_000L,
             id = "chat-messages",

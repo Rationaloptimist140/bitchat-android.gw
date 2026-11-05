@@ -76,7 +76,10 @@ interface FavoritesChangeListener {
  * Manages favorites with Noise↔Nostr mapping
  * Singleton pattern matching iOS implementation.
  */
-class FavoritesPersistenceService private constructor(private val context: Context) {
+class FavoritesPersistenceService private constructor(
+    private val context: Context,
+    private val stateManager: SecureIdentityStateManager = SecureIdentityStateManager(context)
+) {
 
     companion object {
         private const val TAG = "FavoritesPersistenceService"
@@ -89,6 +92,19 @@ class FavoritesPersistenceService private constructor(private val context: Conte
         val shared: FavoritesPersistenceService
             get() = INSTANCE ?: throw IllegalStateException("FavoritesPersistenceService not initialized")
 
+        /** Installs an instance backed by a test identity store (tests only). */
+        @androidx.annotation.VisibleForTesting
+        internal fun installForTest(context: Context, stateManager: SecureIdentityStateManager) {
+            synchronized(this) {
+                INSTANCE = FavoritesPersistenceService(context.applicationContext, stateManager)
+            }
+        }
+
+        @androidx.annotation.VisibleForTesting
+        internal fun resetForTest() {
+            synchronized(this) { INSTANCE = null }
+        }
+
         fun initialize(context: Context) {
             if (INSTANCE == null) {
                 synchronized(this) {
@@ -100,7 +116,6 @@ class FavoritesPersistenceService private constructor(private val context: Conte
         }
     }
 
-    private val stateManager = SecureIdentityStateManager(context)
     private val gson = Gson()
     private val favorites = mutableMapOf<String, FavoriteRelationship>() // noiseHex -> relationship
     private val peerIdIndex = mutableMapOf<String, String>() // peerID (lowercase 16-hex) -> npub

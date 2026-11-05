@@ -29,7 +29,7 @@ data class NostrIdentity(
             val (privateKeyHex, publicKeyHex) = NostrCrypto.generateKeyPair()
             val npub = Bech32.encode("npub", publicKeyHex.hexToByteArrayLocal())
             
-            Log.d(TAG, "Generated new Nostr identity: npub=$npub")
+            Log.d(TAG, "Generated new Nostr identity")
             
             return NostrIdentity(
                 privateKeyHex = privateKeyHex,

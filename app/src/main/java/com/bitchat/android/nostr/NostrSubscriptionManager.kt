@@ -14,11 +14,14 @@ import com.bitchat.android.geohash.LiveLocationPrivacyGate
  */
 class NostrSubscriptionManager(
     private val application: Application,
-    private val owner: String = NostrRelayManager.OWNER_LEGACY
+    private val owner: String = NostrRelayManager.OWNER_LEGACY,
+    private val relayManagerProvider: (Application) -> NostrRelayManager = { NostrRelayManager.getInstance(it) },
+    /** Relays to pin gift-wrap subscriptions to; null keeps the manager's full relay set. */
+    private val giftWrapRelays: List<String>? = null
 ) {
     companion object { private const val TAG = "NostrSubscriptionManager" }
 
-    private val relayManager get() = NostrRelayManager.getInstance(application)
+    private val relayManager get() = relayManagerProvider(application)
 
     fun connect() {
         runCatching { relayManager.connect() }
@@ -43,6 +46,7 @@ class NostrSubscriptionManager(
             filter = filter,
             id = id,
             handler = handler,
+            targetRelayUrls = giftWrapRelays,
             owner = owner,
             liveLocationToken = liveLocationToken
         )
