@@ -64,6 +64,8 @@ class NostrRelayManager private constructor(
         private const val TAG = "NostrRelayManager"
         private const val MAX_QUEUED_EVENTS = 500
         private const val ACK_SWEEP_INTERVAL_MS = 5_000L
+        const val BACKFILL_PAGE_LIMIT = 100
+        const val BACKFILL_MAX_PAGES = 50
         private const val ACK_TIMEOUT_DIRECT_MS = 20_000L
         private const val ACK_TIMEOUT_TOR_MS = 40_000L
         const val OWNER_LEGACY = "legacy"
@@ -150,7 +152,9 @@ class NostrRelayManager private constructor(
          * shared deduplicator. For observers that must not consume events other subscriptions
          * still need (the globe activity sweep overlaps the open chat's subscription).
          */
-        val observeOnly: Boolean = false
+        val observeOnly: Boolean = false,
+        /** Called with the relay URL when that relay signals end of stored events. */
+        val onEndOfStoredEvents: ((String) -> Unit)? = null
     )
     
     // Event deduplication system
@@ -605,7 +609,8 @@ class NostrRelayManager private constructor(
         targetRelayUrls: List<String>? = null,
         owner: String = OWNER_LEGACY,
         liveLocationToken: Long? = null,
-        observeOnly: Boolean = false
+        observeOnly: Boolean = false,
+        onEndOfStoredEvents: ((String) -> Unit)? = null
     ): String {
         val subscriptionInfo = SubscriptionInfo(
             id = id,
@@ -614,7 +619,8 @@ class NostrRelayManager private constructor(
             targetRelayUrls = targetRelayUrls?.toSet(),
             owner = owner,
             liveLocationToken = liveLocationToken,
-            observeOnly = observeOnly
+            observeOnly = observeOnly,
+            onEndOfStoredEvents = onEndOfStoredEvents
         )
         
         runNetworkAction(liveLocationToken) {
@@ -807,6 +813,7 @@ class NostrRelayManager private constructor(
 
             // Clear routing caches (per-geohash relay selections)
             geohashToRelays.clear()
+            backfillPages.clear()
 
             // Clear any queued messages waiting to be sent
             messageQueue.clear()
@@ -1049,6 +1056,95 @@ class NostrRelayManager private constructor(
         }
     }
 
+    // ---------------------------------------------------------------- history backfill
+
+    /** One page of a per-relay backfill query, walking backwards in time. */
+    internal class BackfillPage(
+        val relayUrl: String,
+        val baseFilter: NostrFilter,
+        val until: Int?,
+        val pageLimit: Int,
+        val pagesSoFar: Int,
+        val maxPages: Int,
+        val handler: (NostrEvent) -> Unit,
+        val owner: String,
+        val onRelayComplete: (String) -> Unit
+    ) {
+        @Volatile var count = 0
+        @Volatile var oldestCreatedAt: Int? = null
+
+        fun recordEvent(createdAt: Int) {
+            synchronized(this) {
+                count += 1
+                oldestCreatedAt = oldestCreatedAt?.let { minOf(it, createdAt) } ?: createdAt
+            }
+        }
+    }
+
+    private val backfillPages = ConcurrentHashMap<String, BackfillPage>()
+
+    /**
+     * Fetches every stored event matching [baseFilter] (whose `since` bounds the window) from each
+     * of [relayUrls], one page of [pageLimit] at a time, walking backwards with `until` until a
+     * relay returns a partial page. Relays cap results per query, so a single subscription with a
+     * limit silently drops older events after a long absence. [onRelayComplete] runs per relay
+     * when its window has been fully fetched.
+     */
+    fun backfill(
+        baseFilter: NostrFilter,
+        relayUrls: List<String>,
+        handler: (NostrEvent) -> Unit,
+        owner: String = OWNER_LEGACY,
+        pageLimit: Int = BACKFILL_PAGE_LIMIT,
+        maxPages: Int = BACKFILL_MAX_PAGES,
+        onRelayComplete: (String) -> Unit = {}
+    ) {
+        relayUrls.distinct().forEach { relayUrl ->
+            startBackfillPage(
+                BackfillPage(relayUrl, baseFilter, until = null, pageLimit = pageLimit, pagesSoFar = 0,
+                    maxPages = maxPages, handler = handler, owner = owner, onRelayComplete = onRelayComplete)
+            )
+        }
+    }
+
+    private fun startBackfillPage(page: BackfillPage) {
+        val id = "backfill-${UUID.randomUUID()}"
+        backfillPages[id] = page
+        subscribe(
+            filter = page.baseFilter.copy(until = page.until, limit = page.pageLimit),
+            id = id,
+            handler = page.handler,
+            targetRelayUrls = listOf(page.relayUrl),
+            owner = page.owner
+        )
+    }
+
+    private fun onBackfillPageComplete(subscriptionId: String, page: BackfillPage) {
+        if (backfillPages.remove(subscriptionId) == null) return
+        unsubscribe(subscriptionId)
+        val oldest = page.oldestCreatedAt
+        val since = page.baseFilter.since ?: 0
+        val fullPage = page.count >= page.pageLimit
+        if (!fullPage || oldest == null || oldest <= since || page.pagesSoFar + 1 >= page.maxPages) {
+            if (fullPage && page.pagesSoFar + 1 >= page.maxPages) {
+                Log.w(TAG, "Backfill page cap reached; older events may remain on the relay")
+            }
+            runCatching { page.onRelayComplete(page.relayUrl) }
+            return
+        }
+        // `until` is inclusive. Re-requesting the oldest second may repeat events (deduplicated);
+        // if a full page all shared that second, step past it so paging always advances.
+        val nextUntil = if (page.until != null && oldest >= page.until) page.until - 1 else oldest
+        startBackfillPage(
+            BackfillPage(page.relayUrl, page.baseFilter, nextUntil, page.pageLimit, page.pagesSoFar + 1,
+                page.maxPages, page.handler, page.owner, page.onRelayComplete)
+        )
+    }
+
+    @androidx.annotation.VisibleForTesting
+    internal fun backfillPagesForTest(): Map<String, NostrFilter> =
+        backfillPages.keys.associateWith { id -> activeSubscriptions[id]?.filter ?: NostrFilter() }
+
     /** Writes every delivery that is due for [relayUrl] to [webSocket]. */
     private fun flushPendingDeliveries(relayUrl: String, webSocket: WebSocket) {
         messageQueue.pendingForRelay(relayUrl)
@@ -1142,6 +1238,10 @@ class NostrRelayManager private constructor(
                         return
                     }
 
+                    // Count raw page results before deduplication so paging is not cut short by
+                    // events the live subscription already delivered.
+                    backfillPages[response.subscriptionId]?.recordEvent(response.event.createdAt)
+
                     // DEDUPLICATION: Check if we've already processed this event
                     eventDeduplicator.processEvent(response.event) { event ->
                         // Call handler for new events only
@@ -1160,7 +1260,10 @@ class NostrRelayManager private constructor(
                 }
 
                 is NostrResponse.EndOfStoredEvents -> {
-                    // No action needed
+                    activeSubscriptions[response.subscriptionId]?.onEndOfStoredEvents?.let { callback ->
+                        runCatching { callback(relayUrl) }
+                    }
+                    backfillPages[response.subscriptionId]?.let { onBackfillPageComplete(response.subscriptionId, it) }
                 }
 
                 is NostrResponse.Ok -> {

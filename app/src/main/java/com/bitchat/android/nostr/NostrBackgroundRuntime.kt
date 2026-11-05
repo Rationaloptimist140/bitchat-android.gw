@@ -28,6 +28,7 @@ import kotlin.random.asKotlinRandom
  */
 object NostrBackgroundRuntime {
     private const val TAG = "NostrBackground"
+    private const val BACKFILL_DEBOUNCE_MS = 5L * 60 * 1000
 
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
     private val random = SecureRandom().asKotlinRandom()
@@ -108,12 +109,50 @@ object NostrBackgroundRuntime {
         val identity = NostrIdentityBridge.getCurrentNostrIdentity(application) ?: return
         privateSubscriptions.subscribeGiftWraps(
             pubkey = identity.publicKeyHex,
-            sinceMs = System.currentTimeMillis() - 172_800_000L,
-            id = "chat-messages",
+            sinceMs = System.currentTimeMillis() - HistorySyncPolicy.LIVE_WINDOW_MS,
+            id = HistorySyncPolicy.ACCOUNT_DM_SUBSCRIPTION,
             handler = { event ->
                 eventProcessor.onAccountDm(event, identity)
             }
         )
+        requestHistoryBackfill(force = true)
+    }
+
+    @Volatile private var lastBackfillRequestMs = 0L
+
+    /**
+     * Fetches account gift wraps missed while offline: from the last completed sync (minus the
+     * NIP-17 backdating allowance), paginated so no relay result cap drops older messages. Each
+     * relay's sync position advances only after its whole window was fetched. Debounced.
+     */
+    fun requestHistoryBackfill(force: Boolean = false) {
+        if (!initialized) return
+        val now = System.currentTimeMillis()
+        if (!force && now - lastBackfillRequestMs < BACKFILL_DEBOUNCE_MS) return
+        lastBackfillRequestMs = now
+        val identity = NostrIdentityBridge.getCurrentNostrIdentity(application) ?: return
+        scope.launch {
+            val relays = NostrRelayManager.privateMessagingRelays()
+            val repository = com.bitchat.android.services.AppStateStore.conversationRepositoryOrNull()
+            val lastSync = repository?.let { repo ->
+                runCatching { repo.withOutbox { it.lastSync(HistorySyncPolicy.ACCOUNT_DM_SUBSCRIPTION, relays) } }.getOrNull()
+            }
+            val startedAt = System.currentTimeMillis()
+            privateSubscriptions.backfillGiftWraps(
+                pubkey = identity.publicKeyHex,
+                sinceMs = HistorySyncPolicy.backfillSinceMs(startedAt, lastSync),
+                handler = { event -> eventProcessor.onAccountDm(event, identity) },
+                onRelayComplete = { relayUrl ->
+                    scope.launch {
+                        repository?.let { repo ->
+                            runCatching {
+                                repo.withOutbox { it.recordSync(relayUrl, HistorySyncPolicy.ACCOUNT_DM_SUBSCRIPTION, startedAt) }
+                            }
+                        }
+                    }
+                }
+            )
+        }
     }
 
     private fun observeSelectedChannel() {

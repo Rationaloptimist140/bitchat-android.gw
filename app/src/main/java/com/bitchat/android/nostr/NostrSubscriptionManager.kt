@@ -52,6 +52,26 @@ class NostrSubscriptionManager(
         )
     }
 
+    /**
+     * Paginated fetch of every stored gift wrap for [pubkey] since [sinceMs] on the gift-wrap
+     * relays. [onRelayComplete] runs per relay once its window is fully fetched.
+     */
+    fun backfillGiftWraps(
+        pubkey: String,
+        sinceMs: Long,
+        handler: (NostrEvent) -> Unit,
+        onRelayComplete: (String) -> Unit
+    ) {
+        val relays = giftWrapRelays ?: relayManager.getRelayStatuses().map { it.url }
+        relayManager.backfill(
+            baseFilter = NostrFilter.giftWrapsFor(pubkey, sinceMs).copy(limit = null),
+            relayUrls = relays,
+            handler = handler,
+            owner = owner,
+            onRelayComplete = onRelayComplete
+        )
+    }
+
     /** Subscribe to geohash chat messages only (kind 20000) — low-volume, kept alive in background. */
     fun subscribeGeohashMessages(
         geohash: String,

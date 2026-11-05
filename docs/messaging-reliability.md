@@ -208,6 +208,25 @@ cannot open a version 5 database).
 - **Network monitor.** When a validated internet connection becomes available, disconnected relays
   reconnect immediately (backoff reset) and the outbox is woken (`NetworkMonitor`).
 
+## History synchronisation
+
+- **Window.** The live account-DM subscription keeps its 48 h window. On start, and when internet
+  returns (debounced to once per 5 minutes), a paginated backfill also fetches from the last
+  completed sync minus 23 h, capped at 7 days. The 23 h covers the 22 h NIP-17 timestamp backdating
+  plus a margin.
+- **Pagination.** Relays cap results per query (the live filter uses `limit = 100`, and receipts
+  count towards it). The backfill queries each DM relay in pages of 100, walking backwards with
+  `until` until a relay returns a partial page. If a full page shares one second, the next page steps
+  past it so paging always advances. At most 50 pages are fetched per relay per backfill.
+- **Sync position.** `nostr_sync_state` records, per relay, the time a backfill started, and only
+  after that relay's whole window was fetched. Positions never move backwards.
+- **Age limit.** Gift wraps older than 7 days + 23 h are dropped (previously 48 h 15 min).
+  Replays inside the window are harmless: text is deduplicated by message id, deletions by
+  tombstones (kept for the most recent 20 000 deletions), and files by a deterministic id.
+- **File messages.** A file received over Nostr gets a stable id (sender key + SHA-256 of the
+  payload), so relay replays, retries and backfill do not create duplicate file messages. Known or
+  deleted files are skipped before anything is written to disk.
+
 ## Known pre-existing test issues
 
 - `FileUtilsClearAllMediaTest` "reports failure when a media directory survives" fails only in

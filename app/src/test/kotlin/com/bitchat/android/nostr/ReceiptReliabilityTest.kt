@@ -134,6 +134,12 @@ class ReceiptReliabilityTest {
     }
 
     @Test
+    fun `gift wrap three days old is accepted within the history window`() {
+        handler(seenStore()).onGiftWrap(wrap("late", "pm-old", ageSeconds = 3 * 24 * 3600), "", me)
+        waitUntil { runBlocking { repository.isKnownOrDeletedMessage("pm-old") } }
+    }
+
+    @Test
     fun `relay websocket client sends keep-alive pings`() {
         assertEquals(30_000, com.bitchat.android.net.OkHttpProvider.webSocketClient().pingIntervalMillis)
     }
@@ -162,8 +168,8 @@ class ReceiptReliabilityTest {
         )
     }
 
-    private fun wrap(content: String, messageId: String): NostrEvent {
-        val now = (System.currentTimeMillis() / 1000).toInt()
+    private fun wrap(content: String, messageId: String, ageSeconds: Int = 5): NostrEvent {
+        val now = (System.currentTimeMillis() / 1000).toInt() - ageSeconds + 5
         val embedded = requireNotNull(NostrEmbeddedBitChat.encodePMForNostrNoRecipient(content, messageId))
         val rumorBase = NostrEvent(pubkey = sender.publicKeyHex, createdAt = now - 20, kind = NostrKind.DIRECT_MESSAGE,
             tags = listOf(listOf("p", me.publicKeyHex)), content = embedded)

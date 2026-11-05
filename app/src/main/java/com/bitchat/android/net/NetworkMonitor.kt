@@ -47,5 +47,6 @@ object NetworkMonitor {
             runCatching { manager.onNetworkAvailable() }
         }
         runCatching { MessageRouter.tryGetInstance()?.kickOutbox() }
+        runCatching { com.bitchat.android.nostr.NostrBackgroundRuntime.requestHistoryBackfill() }
     }
 }

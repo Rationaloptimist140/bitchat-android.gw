@@ -41,6 +41,13 @@ class NostrDirectMessageHandler(
 ) {
     companion object {
         private const val TAG = "NostrDirectMessageHandler"
+
+        /** Stable message id for a Nostr file transfer: sender key + payload digest. */
+        internal fun fileMessageId(senderPubkey: String, payload: ByteArray): String {
+            val digest = java.security.MessageDigest.getInstance("SHA-256").digest(payload)
+            val seed = "nostr-file:".toByteArray(Charsets.UTF_8) + senderPubkey.lowercase().toByteArray(Charsets.UTF_8) + digest
+            return java.util.UUID.nameUUIDFromBytes(seed).toString().uppercase()
+        }
         private const val RECEIPT_EXPIRY_MS = 48L * 60 * 60 * 1000
         private const val REACK_MIN_INTERVAL_MS = 10L * 60 * 1000
     }
@@ -70,8 +77,10 @@ class NostrDirectMessageHandler(
             try {
                 if (alreadyProcessed(giftWrap.id)) return@launch
 
+                // Aligned with the history backfill window. Replays inside it are harmless: text is
+                // de-duplicated by message id, deletions by tombstones, files by a content id.
                 val messageAge = System.currentTimeMillis() / 1000 - giftWrap.createdAt
-                if (messageAge > 173700) return@launch // 48 hours + 15 mins
+                if (messageAge > HistorySyncPolicy.MAX_GIFT_WRAP_AGE_SECONDS) return@launch
 
                 val decryptResult = NostrProtocol.decryptPrivateMessage(giftWrap, identity)
                 if (decryptResult == null) {
@@ -243,7 +252,10 @@ class NostrDirectMessageHandler(
                 // Properly handle encrypted file transfer
                 val file = BitchatFilePacket.decode(payload.data)
                 if (file != null) {
-                    val uniqueMsgId = java.util.UUID.randomUUID().toString().uppercase()
+                    // Deterministic id: the same file from the same sender (relay replay, retry or
+                    // backfill) is recognised instead of appearing again with a random id.
+                    val uniqueMsgId = fileMessageId(senderPubkey, payload.data)
+                    if (isKnownOrDeleted(uniqueMsgId)) return
                     val savedPath = com.bitchat.android.features.file.FileUtils.saveIncomingFile(application, file)
                     val message = BitchatMessage(
                         id = uniqueMsgId,

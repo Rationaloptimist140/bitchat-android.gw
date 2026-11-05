@@ -548,6 +548,27 @@ internal class OutboxStore(
         }
     }
 
+    // ---------------------------------------------------------------- history sync
+
+    /** Records that [relayUrl] delivered every stored event for [subscription] up to [syncedAt]. */
+    fun recordSync(relayUrl: String, subscription: String, syncedAt: Long) {
+        database.writableDatabase.execSQL(
+            "INSERT INTO $TABLE_SYNC(relay_url, subscription, last_eose_at) VALUES(?, ?, ?) " +
+                "ON CONFLICT(relay_url, subscription) DO UPDATE SET last_eose_at = MAX(last_eose_at, excluded.last_eose_at)",
+            arrayOf<Any>(relayUrl, subscription, syncedAt)
+        )
+    }
+
+    /** The oldest sync position across [relayUrls], or null if none of them ever synced. */
+    fun lastSync(subscription: String, relayUrls: Collection<String>): Long? {
+        if (relayUrls.isEmpty()) return null
+        val placeholders = relayUrls.joinToString(",") { "?" }
+        return database.readableDatabase.rawQuery(
+            "SELECT MIN(last_eose_at) FROM $TABLE_SYNC WHERE subscription = ? AND relay_url IN ($placeholders)",
+            arrayOf(subscription) + relayUrls.toTypedArray()
+        ).use { c -> if (c.moveToFirst() && !c.isNull(0)) c.getLong(0) else null }
+    }
+
     // ---------------------------------------------------------------- inspection
 
     fun envelopeForMessage(messageId: String): Envelope? =
