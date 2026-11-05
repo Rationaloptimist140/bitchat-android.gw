@@ -146,9 +146,15 @@ class ConversationRepository internal constructor(
         aliases: Set<String>,
         displayName: String?,
         message: BitchatMessage,
-        isRead: Boolean
+        isRead: Boolean,
+        enqueueOutbound: Boolean = false
     ): Boolean = withContext(dispatcher) {
-        upsertMessageLocked(conversationID, aliases, displayName, message, isRead)
+        upsertMessageLocked(conversationID, aliases, displayName, message, isRead, enqueueOutbound)
+    }
+
+    /** Runs [block] against the durable outbox on the repository's single writer thread. */
+    internal suspend fun <T> withOutbox(block: (OutboxStore) -> T): T = withContext(dispatcher) {
+        block(database.outbox)
     }
 
     private fun upsertMessageLocked(
@@ -156,14 +162,16 @@ class ConversationRepository internal constructor(
         aliases: Set<String>,
         displayName: String?,
         message: BitchatMessage,
-        isRead: Boolean
+        isRead: Boolean,
+        enqueueOutbound: Boolean = false
     ): Boolean = try {
         val result = database.upsertMessage(
             conversationID = conversationID,
             aliases = aliases,
             displayName = displayName,
             message = message,
-            isRead = isRead
+            isRead = isRead,
+            enqueueOutbound = enqueueOutbound
         )
         deleteStoredMedia(result.orphanedMediaPaths)
         _storeState.value = ConversationStoreState.Ready
@@ -345,6 +353,15 @@ class ConversationRepository internal constructor(
         )
     }
 
+    internal suspend fun loadMessageWithConversation(messageID: String): Pair<String, BitchatMessage>? =
+        withContext(dispatcher) {
+            try {
+                database.loadMessageWithConversation(messageID)
+            } catch (_: Exception) {
+                null
+            }
+        }
+
     internal suspend fun loadDeliveryStatusForTest(messageID: String): DeliveryStatus? =
         withContext(dispatcher) { database.loadDeliveryStatus(messageID) }
 
@@ -406,13 +423,18 @@ internal class ConversationDatabase(
         const val MAX_MEDIA_BYTES = 256L * 1024L * 1024L
 
         internal const val DEFAULT_DATABASE_NAME = "private_conversations.db"
-        internal const val DATABASE_VERSION = 4
+        internal const val DATABASE_VERSION = 5
+        /** Undelivered outgoing messages keep retrying for this long before showing Failed. */
+        internal const val OUTBOX_MESSAGE_EXPIRY_MS = 7L * 24 * 60 * 60 * 1000
         private const val PRUNE_INTERVAL = 64
         private const val PRUNE_BATCH_SIZE = 256
     }
 
     private val applicationContext = context.applicationContext
     private var writesSinceGlobalPrune = 0
+
+    /** Durable outbox sharing this database, its writer thread and its cipher. */
+    internal val outbox = OutboxStore(this, storageCipher)
 
     init {
         setWriteAheadLoggingEnabled(true)
@@ -522,6 +544,7 @@ internal class ConversationDatabase(
             "CREATE INDEX idx_deleted_private_messages_time " +
                 "ON deleted_private_messages(deleted_at)"
         )
+        OutboxStore.createSchema(db)
     }
 
     override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
@@ -556,6 +579,12 @@ internal class ConversationDatabase(
                 }
             }
             version = 4
+        }
+        if (version == 4) {
+            // Additive only: existing message rows are untouched. SQLiteOpenHelper runs onUpgrade
+            // in a transaction, so a failure leaves the database at version 4 with all data.
+            OutboxStore.createSchema(db)
+            version = 5
         }
         check(version == newVersion) {
             "Missing conversation database migration from $version to $newVersion"
@@ -794,7 +823,8 @@ internal class ConversationDatabase(
         aliases: Set<String>,
         displayName: String?,
         message: BitchatMessage,
-        isRead: Boolean
+        isRead: Boolean,
+        enqueueOutbound: Boolean = false
     ): ConversationUpsertResult {
         val normalizedID = conversationID.trim()
         if (normalizedID.isBlank()) {
@@ -822,6 +852,11 @@ internal class ConversationDatabase(
             messageInserted = inserted != -1L
             if (inserted != -1L) {
                 registerAttachmentLocked(this, message)
+                if (enqueueOutbound) {
+                    // Same transaction as the message row: a persisted outgoing message always
+                    // has its durable outbox envelope (crash boundary T1).
+                    outbox.insertMessageEnvelope(this, message.id, now, now + OUTBOX_MESSAGE_EXPIRY_MS, now + OUTBOX_MESSAGE_EXPIRY_MS)
+                }
             }
             if (inserted == -1L) {
                 val existingConversation = rawQuery(
@@ -885,6 +920,25 @@ internal class ConversationDatabase(
             arrayOf(messageID)
         ).use { cursor -> if (cursor.moveToFirst()) cursor.toMessage().deliveryStatus else null }
 
+    /** The stored message and its conversation id, for sending from the outbox. */
+    fun loadMessageWithConversation(messageID: String): Pair<String, BitchatMessage>? =
+        readableDatabase.rawQuery(
+            "SELECT ${MESSAGE_COLUMNS.joinToString(",")} FROM private_messages WHERE message_id = ?",
+            arrayOf(messageID)
+        ).use { cursor ->
+            if (!cursor.moveToFirst()) return null
+            cursor.getString(cursor.getColumnIndexOrThrow("conversation_id")) to cursor.toMessage()
+        }
+
+    /** True when [messageID] was authored on this device (its author is not the conversation). */
+    fun isOwnOutgoingMessage(messageID: String): Boolean {
+        val conversation = readableDatabase.rawQuery(
+            "SELECT conversation_id FROM private_messages WHERE message_id = ?",
+            arrayOf(messageID)
+        ).use { if (it.moveToFirst()) it.getString(0) else null } ?: return false
+        return isOutgoingMessageInConversation(messageID, setOf(conversation))
+    }
+
     fun isOutgoingMessageInConversation(messageID: String, counterpartIds: Set<String>): Boolean {
         val candidates = counterpartIds.map { it.trim() }.filter { it.isNotEmpty() }.toSet()
         if (candidates.isEmpty()) return false
@@ -947,6 +1001,9 @@ internal class ConversationDatabase(
             ).use { cursor ->
                 if (cursor.moveToFirst()) cursor.toMessage() else null
             } ?: return@inTransaction
+            if (status is DeliveryStatus.Delivered || status is DeliveryStatus.Read) {
+                outbox.onRecipientEvidence(this, messageID, read = status is DeliveryStatus.Read, now = System.currentTimeMillis())
+            }
             update(
                 "private_messages",
                 ContentValues().apply {
@@ -1061,6 +1118,8 @@ internal class ConversationDatabase(
                     queryMessageIDsLocked(this, id)
                 }
             val attachmentCandidates = attachmentCandidatesLocked(this, messageIDs)
+            // MESSAGE envelopes cascade with their messages; receipt envelopes are explicit.
+            outbox.deleteReceiptsForConversations(this, ids)
             ids.filter { it.isNotBlank() }.forEach { id ->
                 delete(
                     "conversations",
@@ -1142,6 +1201,7 @@ internal class ConversationDatabase(
         // Destroy the only usable copy of the history key before attempting filesystem cleanup.
         storageCipher.destroyKey()
         writableDatabase.inTransaction {
+            outbox.clearAll(this)
             delete("conversation_aliases", null, null)
             delete("message_attachments", null, null)
             delete("private_messages", null, null)
@@ -1438,6 +1498,10 @@ internal class ConversationDatabase(
                     SELECT MAX(arrival_sequence)
                     FROM private_messages
                     WHERE conversation_id = ? COLLATE NOCASE
+                )
+                AND message_id NOT IN (
+                    SELECT message_id FROM outbound_envelopes
+                    WHERE message_id IS NOT NULL AND state IN (0, 1, 2, 3)
                 )
             ORDER BY is_read DESC, arrival_sequence ASC
             LIMIT ?

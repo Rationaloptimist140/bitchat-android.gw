@@ -103,6 +103,97 @@ exit may see both connections; relay operators see separate connections.
 to pending and resends due work on open sockets. Outcomes are published on
 `NostrRelayManager.publishOutcomes` (event id, relay, verdict, reason prefix).
 
+## Durable outbox
+
+Outgoing private messages and Nostr receipts are stored in a durable outbox in the conversation
+database (`OutboxStore`, schema version 5). That way they survive app closure, process death and
+reboots, and status changes are transactional with the message row.
+
+### Tables
+
+- `outbound_envelopes`: one row per (kind, message). Kinds are MESSAGE, DELIVERY_ACK and
+  READ_RECEIPT. MESSAGE rows reference `private_messages(message_id)` with `ON DELETE CASCADE`.
+  Receipt rows carry an encrypted payload (recipient key, relay channel) and their conversation id.
+- `outbound_nostr_events`: the signed gift wrap(s) of an envelope, encrypted with the conversation
+  storage cipher; `ON DELETE CASCADE` from the envelope. Superseded events are kept so late `OK`
+  frames still map to their envelope.
+- `nostr_sync_state`: per-relay history-sync position (used by history synchronisation).
+
+Message content is never copied into the outbox; it is read from the encrypted message row.
+
+### States
+
+```
+compose ─► QUEUED ─claim─► TRANSMITTING ─mesh receipt─────────────► DELIVERED ─read─► READ
+             ▲               │  │   └─relay OK─► CARRIER_ACCEPTED ─receipt─┘
+             │  no route /   │  │                   │   (republish +1h,+6h,+24h,+72h)
+             │  mesh timeout │  │                   └─7 days─► ACCEPTED_EXPIRED (stays Sent)
+             └── RETRY_WAIT ◄┘  │
+                   └─ 7 days without acceptance ─► FAILED ─(user: Retry sending)─► QUEUED
+deleting the message or conversation at any point removes the envelope (cascade)
+```
+
+| Envelope state | User sees |
+|---|---|
+| QUEUED, TRANSMITTING, RETRY_WAIT | Waiting |
+| CARRIER_ACCEPTED, ACCEPTED_EXPIRED | Sent |
+| DELIVERED / READ | Delivered / Read |
+| FAILED | Didn't send |
+
+### Transactions and crash recovery
+
+| Point | Transaction | If the process dies just before commit |
+|---|---|---|
+| Compose | Message row and MESSAGE envelope (`upsertMessage(enqueueOutbound = true)`) | Neither exists; the UI never showed it |
+| Claim | Due, unleased envelope → TRANSMITTING with a 60 s lease | The lease expires and the work is reclaimed (`recoverExpiredLeases`) |
+| Event signing | The signed gift wrap is persisted before any socket write (`recordNostrEvent`) | The event never left the device; a fresh one is built |
+| Socket write | (none) | The same stored event is republished; a relay that has it answers `duplicate:` (counted as accepted) |
+| Relay OK | Envelope → CARRIER_ACCEPTED and message → Sent | The next republish gets `duplicate:` and the same transaction runs |
+| Recipient receipt | Envelope → DELIVERED/READ inside the status update | Relays replay the receipt within the history window, and the sender's republishes are re-acknowledged |
+
+Delivery is at least once. A crash between transmitting and recording can send the same message
+twice; the receiver deduplicates by message id.
+
+### Idempotency
+
+- One envelope per (kind, message id) (partial unique indexes).
+- Every transition is a conditional `UPDATE … WHERE state IN (…)`.
+- Message status only moves forward (`statusPriority`). Failed cannot replace Delivered or Read.
+- Republishing reuses the stored event id. A fresh event (new id, same message UUID) is created only
+  when the stored one is missing or its randomised timestamp is more than 24 h old.
+
+### Routing an attempt (`OutboxScheduler`)
+
+1. Mesh peer connected with a Noise session → send over the mesh with the same message id, then wait
+   30 s for the receipt.
+2. Otherwise, mutual favourite with a known Nostr key → publish the stored (or new) gift wrap to the
+   DM relays.
+3. Otherwise wait with backoff (5 s, 30 s, 2 min, 10 min, 1 h, then every 6 h, ±20 % jitter) and
+   nudge a Noise handshake if the peer is visible.
+
+Once a relay has accepted a message, it is republished on the schedule above until a receipt
+arrives. If the peer becomes reachable over the mesh, the message is also sent there once per retry
+epoch. The first authenticated receipt from either transport completes it.
+
+### Expiry, retry, deletion and panic wipe
+
+- Unaccepted messages fail after 7 days. Accepted messages stop republishing after 7 days and stay Sent.
+- **Retry sending** (message sheet) is the only backward transition: allowed only from Failed, it
+  bumps `retry_epoch`, resets attempts and expiry, and keeps the message id.
+- Deleting a message or conversation removes its envelopes and events, and the claim step re-checks
+  tombstones. Retention pruning skips messages that still have an active envelope.
+- Panic wipe: `clearAll()` destroys the storage key and then explicitly deletes every outbox table
+  (it does not rely on cascades). The scheduler then finds no work.
+- Messages left at Sending by an older version are adopted on first start if they are less than 7
+  days old, otherwise marked Failed (they can be retried).
+
+### Migration
+
+Version 4 → 5 only creates tables and indexes. `SQLiteOpenHelper` runs it in a transaction: if it
+fails, the database stays at version 4 with all data, and the database is never deleted or
+recreated. Downgrading to an older app version after the migration is not supported (older builds
+cannot open a version 5 database).
+
 ## Known pre-existing test issues
 
 - `FileUtilsClearAllMediaTest` "reports failure when a media directory survives" fails only in

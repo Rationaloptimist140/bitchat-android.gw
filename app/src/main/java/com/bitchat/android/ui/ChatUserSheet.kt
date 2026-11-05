@@ -91,6 +91,26 @@ fun ChatUserSheet(
                         }
                     }
                     
+                    // Retry a private message that could not be sent (same message id; the
+                    // receiver de-duplicates if an earlier attempt did arrive).
+                    selectedMessage?.takeIf {
+                        it.isPrivate &&
+                            it.sender == viewModel.nickname.value &&
+                            it.deliveryStatus is com.bitchat.android.model.DeliveryStatus.Failed
+                    }?.let { message ->
+                        item {
+                            UserActionRow(
+                                title = stringResource(R.string.action_retry_message_title),
+                                subtitle = stringResource(R.string.action_retry_message_subtitle),
+                                titleColor = standardGrey,
+                                onClick = {
+                                    viewModel.retryFailedMessage(message.id)
+                                    onDismiss()
+                                }
+                            )
+                        }
+                    }
+
                     // Only show user actions for other users' messages or when no message is selected
                     if (selectedMessage?.sender != viewModel.nickname.value) {
                         // Send private message action

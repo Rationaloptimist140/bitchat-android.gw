@@ -279,7 +279,8 @@ object AppStateStore {
     suspend fun addPrivateMessageDurably(
         peerID: String,
         msg: BitchatMessage,
-        forceRead: Boolean = false
+        forceRead: Boolean = false,
+        enqueueOutbound: Boolean = false
     ): Boolean {
         val persistence = synchronized(this) {
             if (privateConversationWritesSuspended) return false
@@ -298,7 +299,8 @@ object AppStateStore {
             aliases = persistence.aliases,
             displayName = persistence.displayName,
             message = msg,
-            isRead = persistence.isRead
+            isRead = persistence.isRead,
+            enqueueOutbound = enqueueOutbound
         )
         return synchronized(this) {
             reservedPrivateMessageIds.remove(msg.id)
@@ -432,6 +434,9 @@ object AppStateStore {
     }
 
     private val receiptScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+
+    /** The persistence backend, when conversation persistence is active. */
+    internal fun conversationRepositoryOrNull(): ConversationRepository? = conversationRepository
 
     /**
      * Whether [messageID] is an outgoing message in the conversation of the counterpart

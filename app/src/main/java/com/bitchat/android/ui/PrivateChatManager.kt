@@ -171,7 +171,8 @@ class PrivateChatManager(
             deliveryStatus = DeliveryStatus.Sending
         )
 
-        if (!messageManager.addPrivateMessageDurably(conversationID, message, forceRead = true)) {
+        // The message row and its durable outbox envelope are written in one transaction.
+        if (!messageManager.addPrivateMessageDurably(conversationID, message, forceRead = true, enqueueOutbound = true)) {
             return false
         }
         onSendMessage(content, conversationID, recipientNickname ?: "", message.id)

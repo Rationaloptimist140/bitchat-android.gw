@@ -194,7 +194,7 @@ class RelayAcknowledgementTest {
 
     @Test
     fun `no production code sets Sent without relay evidence`() {
-        val allowed = setOf("NostrTransport.kt", "OutboxScheduler.kt", "ConversationRepository.kt", "OutboxRepository.kt")
+        val allowed = setOf("NostrTransport.kt", "OutboxScheduler.kt", "ConversationRepository.kt", "OutboxStore.kt")
         val offenders = File("src/main/java").walkTopDown()
             .filter { it.isFile && it.extension == "kt" && it.name !in allowed }
             .flatMap { file ->

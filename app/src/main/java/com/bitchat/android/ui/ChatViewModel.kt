@@ -1424,6 +1424,17 @@ class ChatViewModel(
 
     private var panicClearInProgress = false
 
+    /** Retries a private message that failed to send, keeping its message id. */
+    fun retryFailedMessage(messageID: String) {
+        viewModelScope.launch {
+            try {
+                com.bitchat.android.services.MessageRouter
+                    .getInstance(getApplication(), mesh)
+                    .retryFailedMessage(messageID)
+            } catch (_: Exception) { }
+        }
+    }
+
     fun panicClearAllData() {
         if (panicClearInProgress) return
         panicClearInProgress = true

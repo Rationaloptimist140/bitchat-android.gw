@@ -388,6 +388,8 @@
   <string name="choose_action_user">Choose an action for this user</string>
   <string name="action_copy_message_title">Copy message</string>
   <string name="action_copy_message_subtitle">Copy this message to clipboard</string>
+  <string name="action_retry_message_title">Retry sending</string>
+  <string name="action_retry_message_subtitle">Try to send this message again</string>
   <string name="action_slap_title">Slap %1$s</string>
   <string name="action_slap_subtitle">Send a playful slap message</string>
   <string name="action_hug_title">Hug %1$s</string>

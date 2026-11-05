@@ -110,14 +110,16 @@ class MessageManager(private val state: ChatState) {
     suspend fun addPrivateMessageDurably(
         peerID: String,
         message: BitchatMessage,
-        forceRead: Boolean = false
+        forceRead: Boolean = false,
+        enqueueOutbound: Boolean = false
     ): Boolean {
         val conversationID = ContactDirectory.canonicalConversationId(peerID)
         val accepted = try {
             com.bitchat.android.services.AppStateStore.addPrivateMessageDurably(
                 peerID = conversationID,
                 msg = message,
-                forceRead = forceRead
+                forceRead = forceRead,
+                enqueueOutbound = enqueueOutbound
             )
         } catch (_: Exception) {
             false

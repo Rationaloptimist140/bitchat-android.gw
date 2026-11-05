@@ -96,6 +96,60 @@ class NostrTransport(
         AppStateStore.updatePrivateMessageStatus(messageID, DeliveryStatus.Failed(reason))
     }
     
+    /** Result of preparing an account-identity private message for Nostr. */
+    internal sealed class PrepareResult {
+        data class Prepared(val event: NostrEvent) : PrepareResult()
+        data class Unroutable(val reason: String) : PrepareResult()
+    }
+
+    /**
+     * Builds and signs the gift wrap for an account-identity private message without publishing
+     * it, so the durable outbox can persist the signed event before any socket write.
+     */
+    internal fun prepareAccountPrivateMessage(content: String, to: String, messageID: String): PrepareResult {
+        val recipientNostrPubkey = resolveNostrPublicKey(to)
+            ?: return PrepareResult.Unroutable("No internet route to this contact")
+        val senderIdentity = NostrIdentityBridge.getCurrentNostrIdentity(context)
+            ?: return PrepareResult.Unroutable("Internet messaging identity unavailable")
+        val recipientHex = ContactIdentityResolver.nostrPubkeyHex(recipientNostrPubkey)
+            ?: return PrepareResult.Unroutable("No internet route to this contact")
+        val recipientPeerIDForEmbed = try {
+            com.bitchat.android.favorites.FavoritesPersistenceService.shared
+                .findPeerIDForNostrPubkey(recipientNostrPubkey)
+        } catch (_: Exception) { null }
+        if (recipientPeerIDForEmbed.isNullOrBlank()) {
+            return PrepareResult.Unroutable("No internet route to this contact")
+        }
+        val embedded = NostrEmbeddedBitChat.encodePMForNostr(
+            content = content,
+            messageID = messageID,
+            recipientPeerID = recipientPeerIDForEmbed,
+            senderPeerID = senderPeerID
+        ) ?: return PrepareResult.Unroutable("Message could not be prepared")
+        val event = NostrProtocol.createPrivateMessage(
+            content = embedded,
+            recipientPubkey = recipientHex,
+            senderIdentity = senderIdentity
+        ).firstOrNull() ?: return PrepareResult.Unroutable("Message could not be prepared")
+        return PrepareResult.Prepared(event)
+    }
+
+    /** Builds and signs an account-identity delivery or read receipt for [recipientHex]. */
+    internal fun prepareAccountReceipt(type: NoisePayloadType, messageID: String, recipientHex: String): NostrEvent? {
+        val identity = NostrIdentityBridge.getCurrentNostrIdentity(context) ?: return null
+        val embedded = NostrEmbeddedBitChat.encodeAckForNostrNoRecipient(type = type, messageID = messageID)
+            ?: return null
+        return NostrProtocol.createPrivateMessage(
+            content = embedded,
+            recipientPubkey = recipientHex,
+            senderIdentity = identity
+        ).firstOrNull()
+    }
+
+    /**
+     * Fire-and-forget send used when the durable outbox is unavailable. Status still advances only
+     * on relay acceptance; unroutable messages are marked failed.
+     */
     fun sendPrivateMessage(
         content: String,
         to: String,
@@ -104,64 +158,19 @@ class NostrTransport(
     ) {
         transportScope.launch {
             try {
-                val recipientNostrPubkey = resolveNostrPublicKey(to)
-                
-                if (recipientNostrPubkey == null) {
-                    Log.w(TAG, "No Nostr public key known for recipient")
-                    markUnsendable(messageID, "No internet route to this contact")
-                    return@launch
+                when (val prepared = prepareAccountPrivateMessage(content, to, messageID)) {
+                    is PrepareResult.Unroutable -> {
+                        Log.w(TAG, "Private message not routable over Nostr")
+                        markUnsendable(messageID, prepared.reason)
+                    }
+                    is PrepareResult.Prepared -> {
+                        val event = prepared.event
+                        NostrRelayManager.registerPendingGiftWrap(event.id)
+                        // Track before publishing so an immediate OK cannot be missed.
+                        trackPublishedMessage(event.id, messageID, NostrRelayManager.privateMessagingRelays())
+                        NostrRelayManager.privateMessaging(context).sendEvent(event, NostrRelayManager.privateMessagingRelays())
+                    }
                 }
-                
-                val senderIdentity = NostrIdentityBridge.getCurrentNostrIdentity(context)
-                if (senderIdentity == null) {
-                    Log.e(TAG, "No Nostr identity available")
-                    markUnsendable(messageID, "Internet messaging identity unavailable")
-                    return@launch
-                }
-                
-                val recipientHex = ContactIdentityResolver.nostrPubkeyHex(recipientNostrPubkey)
-                if (recipientHex == null) {
-                    Log.e(TAG, "NostrTransport: recipient key is not a valid Nostr pubkey")
-                    markUnsendable(messageID, "No internet route to this contact")
-                    return@launch
-                }
-
-                val recipientPeerIDForEmbed = try {
-                    com.bitchat.android.favorites.FavoritesPersistenceService.shared
-                        .findPeerIDForNostrPubkey(recipientNostrPubkey)
-                } catch (_: Exception) { null }
-                if (recipientPeerIDForEmbed.isNullOrBlank()) {
-                    Log.e(TAG, "NostrTransport: no peerID stored for recipient npub; cannot embed PM")
-                    markUnsendable(messageID, "No internet route to this contact")
-                    return@launch
-                }
-                val embedded = NostrEmbeddedBitChat.encodePMForNostr(
-                    content = content,
-                    messageID = messageID,
-                    recipientPeerID = recipientPeerIDForEmbed,
-                    senderPeerID = senderPeerID
-                )
-                
-                
-                if (embedded == null) {
-                    Log.e(TAG, "NostrTransport: failed to embed PM packet")
-                    markUnsendable(messageID, "Message could not be prepared")
-                    return@launch
-                }
-                
-                val giftWraps = NostrProtocol.createPrivateMessage(
-                    content = embedded,
-                    recipientPubkey = recipientHex,
-                    senderIdentity = senderIdentity
-                )
-                
-                giftWraps.forEach { event ->
-                    NostrRelayManager.registerPendingGiftWrap(event.id)
-                    // Track before publishing so an immediate OK cannot be missed.
-                    trackPublishedMessage(event.id, messageID, NostrRelayManager.privateMessagingRelays())
-                    NostrRelayManager.privateMessaging(context).sendEvent(event, NostrRelayManager.privateMessagingRelays())
-                }
-
             } catch (e: Exception) {
                 Log.e(TAG, "Failed to send private message via Nostr: ${e.javaClass.simpleName}")
                 markUnsendable(messageID, "Message could not be prepared")

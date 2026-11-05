@@ -92,6 +92,33 @@ class MessageRouter private constructor(
     // Injectable clock for tests
     internal var clock: () -> Long = { System.currentTimeMillis() }
 
+    /** Transport availability for the durable outbox scheduler. */
+    private val outboxRouting = object : OutboxScheduler.Routing {
+        override val mesh: MeshService get() = this@MessageRouter.mesh
+        override fun readyMeshTarget(conversationId: String): String? =
+            ContactDirectory.resolve(conversationId).meshPeerID?.takeIf { isReady(this@MessageRouter.mesh, it) }
+        override fun visibleMeshTarget(conversationId: String): String? =
+            ContactDirectory.resolve(conversationId).meshPeerID?.takeIf { isConnected(this@MessageRouter.mesh, it) }
+        override fun nostrTarget(conversationId: String): String? {
+            val resolution = ContactDirectory.resolve(conversationId)
+            val target = resolution.noiseKeyHex ?: conversationId
+            return target.takeIf { canSendViaNostr(it) }
+        }
+        override fun requestHandshake(conversationId: String, meshTarget: String) =
+            kickHandshake(conversationId, meshTarget, immediate = false)
+    }
+
+    @Volatile private var durableOutbox: OutboxScheduler? = null
+
+    /** The durable outbox, available whenever conversation persistence is active. */
+    private fun durableOutbox(): OutboxScheduler? {
+        durableOutbox?.let { return it }
+        val repository = AppStateStore.conversationRepositoryOrNull() ?: return null
+        return synchronized(this) {
+            durableOutbox ?: OutboxScheduler(context, repository, outboxRouting).also { durableOutbox = it }
+        }
+    }
+
     // Called with the messageID of queued messages that expired or were evicted
     var onMessageExpired: ((String) -> Unit)? = null
 
@@ -117,11 +144,6 @@ class MessageRouter private constructor(
     }
 
     fun sendPrivate(content: String, toPeerID: String, recipientNickname: String, messageID: String): RouteResult {
-        val resolution = ContactDirectory.resolve(toPeerID)
-        val conversationID = resolution.conversationID
-        val meshTarget = resolution.meshPeerID ?: toPeerID.takeIf { ContactIdentityResolver.isMeshPeerId(it) }
-        val nostrTarget = resolution.noiseKeyHex ?: toPeerID
-
         if (com.bitchat.android.nostr.GeohashAliasRegistry.contains(toPeerID)) {
             Log.d(TAG, "Routing PM via Nostr (geohash) to alias ${toPeerID.take(12)}… id=${messageID.take(8)}…")
             val recipientHex = com.bitchat.android.nostr.GeohashAliasRegistry.get(toPeerID)
@@ -133,6 +155,41 @@ class MessageRouter private constructor(
             return RouteResult.DROPPED
         }
 
+        // Durable path: the message row and its outbox envelope were persisted together. The
+        // scheduler routes, retries, falls back and records evidence; nothing is sent here.
+        durableOutbox()?.let { outbox ->
+            val repository = AppStateStore.conversationRepositoryOrNull()
+            if (repository != null && !disableSchedulerForTesting) {
+                schedulerScope.launch {
+                    val now = clock()
+                    val enqueued = repository.withOutbox {
+                        it.ensureMessageEnvelope(
+                            messageID,
+                            now,
+                            now + ConversationDatabase.OUTBOX_MESSAGE_EXPIRY_MS,
+                            now + ConversationDatabase.OUTBOX_MESSAGE_EXPIRY_MS
+                        )
+                    }
+                    if (enqueued) {
+                        outbox.start()
+                        outbox.kick()
+                    } else {
+                        // Not persisted (no message row): keep the previous in-memory behaviour.
+                        routeInMemory(content, toPeerID, recipientNickname, messageID)
+                    }
+                }
+                return RouteResult.QUEUED
+            }
+        }
+        return routeInMemory(content, toPeerID, recipientNickname, messageID)
+    }
+
+    /** Pre-outbox routing, used when conversation persistence is unavailable. */
+    private fun routeInMemory(content: String, toPeerID: String, recipientNickname: String, messageID: String): RouteResult {
+        val resolution = ContactDirectory.resolve(toPeerID)
+        val conversationID = resolution.conversationID
+        val meshTarget = resolution.meshPeerID ?: toPeerID.takeIf { ContactIdentityResolver.isMeshPeerId(it) }
+        val nostrTarget = resolution.noiseKeyHex ?: toPeerID
         val hasMesh = meshTarget?.let { isConnected(mesh, it) } == true
         if (meshTarget != null && isReady(mesh, meshTarget)) {
             Log.d(TAG, "Routing PM via mesh to ${meshTarget} msg_id=${messageID.take(8)}…")
@@ -270,6 +327,7 @@ class MessageRouter private constructor(
     @Synchronized
     private fun startOutboxScheduler() {
         if (disableSchedulerForTesting) return
+        durableOutbox()?.start()
         if (schedulerJob?.isActive == true) return
         schedulerJob = schedulerScope.launch {
             while (isActive) {
@@ -289,6 +347,35 @@ class MessageRouter private constructor(
     fun stopOutboxScheduler() {
         schedulerJob?.cancel()
         schedulerJob = null
+        durableOutbox?.stop()
+    }
+
+    /** Wakes the durable outbox (network became available, relay reconnected, user retry). */
+    fun kickOutbox() {
+        if (disableSchedulerForTesting) return
+        durableOutbox()?.let { it.start(); it.kick() }
+    }
+
+    /**
+     * Manually retries a failed private message with the same message UUID. Returns true if a
+     * retry was queued (the message was Failed and is now Waiting).
+     */
+    suspend fun retryFailedMessage(messageID: String): Boolean {
+        val repository = AppStateStore.conversationRepositoryOrNull() ?: return false
+        val now = clock()
+        val queued = repository.withOutbox {
+            it.retryFailed(
+                messageID,
+                now,
+                now + ConversationDatabase.OUTBOX_MESSAGE_EXPIRY_MS,
+                now + ConversationDatabase.OUTBOX_MESSAGE_EXPIRY_MS
+            )
+        }
+        if (queued) {
+            AppStateStore.updatePrivateMessageStatus(messageID, com.bitchat.android.model.DeliveryStatus.Sending)
+            kickOutbox()
+        }
+        return queued
     }
 
     internal val isSchedulerRunning: Boolean get() = schedulerJob?.isActive == true
@@ -377,6 +464,7 @@ class MessageRouter private constructor(
 
     // Called when mesh peer list changes; attempt to flush any matching outbox entries
     fun onPeersUpdated(peers: List<String>) {
+        if (peers.isNotEmpty()) kickOutbox()
         peers.forEach { pid ->
             kickHandshakeIfPending(pid)
             flushOutboxFor(pid)
@@ -392,6 +480,7 @@ class MessageRouter private constructor(
 
     // Called when a Noise session becomes established; flush both the mesh peerID and its noiseHex alias
     fun onSessionEstablished(peerID: String) {
+        kickOutbox()
         resetRetry(peerID)
         flushOutboxFor(peerID)
         val noiseHex = try {
