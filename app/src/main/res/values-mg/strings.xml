@@ -177,6 +177,8 @@
     <string name="choose_action_user">safidio hetsika ho an\'ity mpampiasa ity</string>
     <string name="action_copy_message_title">adikao ny hafatra</string>
     <string name="action_copy_message_subtitle">adikao ity hafatra ity any amin\'ny clipboard</string>
+    <string name="action_retry_message_title">Andramo alefa indray</string>
+    <string name="action_retry_message_subtitle">Andramo alefa indray ity hafatra ity</string>
     <string name="action_slap_title">kapohina %1$s</string>
     <string name="action_slap_subtitle">handefasa hafatra kapohana an-dalao</string>
     <string name="action_hug_title">honofinofy %1$s</string>

@@ -177,6 +177,8 @@
     <string name="choose_action_user">scegli un\'azione per questo utente</string>
     <string name="action_copy_message_title">copia messaggio</string>
     <string name="action_copy_message_subtitle">copia questo messaggio negli appunti</string>
+    <string name="action_retry_message_title">Riprova l\'invio</string>
+    <string name="action_retry_message_subtitle">Prova a inviare di nuovo questo messaggio</string>
     <string name="action_slap_title">schiaffeggia %1$s</string>
     <string name="action_slap_subtitle">invia uno schiaffo giocoso</string>
     <string name="action_hug_title">abbraccia %1$s</string>

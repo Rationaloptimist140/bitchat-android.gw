@@ -177,6 +177,8 @@
     <string name="choose_action_user">Elegir acción para este usuario</string>
     <string name="action_copy_message_title">Copiar mensaje</string>
     <string name="action_copy_message_subtitle">Copiar este mensaje al portapapeles</string>
+    <string name="action_retry_message_title">Reintentar envío</string>
+    <string name="action_retry_message_subtitle">Intentar enviar este mensaje de nuevo</string>
     <string name="action_slap_title">Abofetear a %1$s</string>
     <string name="action_slap_subtitle">Enviar una bofetada juguetona</string>
     <string name="action_hug_title">Abrazar a %1$s</string>

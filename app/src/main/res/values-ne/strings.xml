@@ -170,6 +170,8 @@
     <string name="choose_action_user">यस प्रयोगकर्ताका लागि कार्य छान्नुहोस्</string>
     <string name="action_copy_message_title">सन्देश प्रतिलिपि</string>
     <string name="action_copy_message_subtitle">यो सन्देश क्लिपबोर्डमा प्रतिलिपि गर्नुहोस्</string>
+    <string name="action_retry_message_title">फेरि पठाउनुहोस्</string>
+    <string name="action_retry_message_subtitle">यो सन्देश फेरि पठाउने प्रयास गर्नुहोस्</string>
     <string name="action_slap_title">%1$s लाई चड्कन</string>
     <string name="action_slap_subtitle">मनोरञ्जनका लागि चड्कन पठाउनुहोस्</string>
     <string name="action_hug_title">%1$s लाई अँगालो</string>

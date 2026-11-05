@@ -177,6 +177,8 @@
     <string name="choose_action_user">اقدامی برای این کاربر انتخاب کنید</string>
     <string name="action_copy_message_title">کپی پیام</string>
     <string name="action_copy_message_subtitle">این پیام را در کلیپ‌بورد کپی کن</string>
+    <string name="action_retry_message_title">تلاش دوباره برای ارسال</string>
+    <string name="action_retry_message_subtitle">این پیام را دوباره ارسال کنید</string>
     <string name="action_slap_title">%1$s را سیلی بزن</string>
     <string name="action_slap_subtitle">یک سیلی شوخی ارسال کن</string>
     <string name="action_hug_title">%1$s را بغل کن</string>

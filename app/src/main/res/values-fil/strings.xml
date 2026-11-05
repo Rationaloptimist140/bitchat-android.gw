@@ -170,6 +170,8 @@
     <string name="choose_action_user">pumili ng aksyon para sa user na ito</string>
     <string name="action_copy_message_title">kopyahin ang mensahe</string>
     <string name="action_copy_message_subtitle">kopyahin ang mensaheng ito sa clipboard</string>
+    <string name="action_retry_message_title">Subukang ipadala muli</string>
+    <string name="action_retry_message_subtitle">Subukang ipadala muli ang mensaheng ito</string>
     <string name="action_slap_title">sapakin si %1$s</string>
     <string name="action_slap_subtitle">magpadala ng birong sampal</string>
     <string name="action_hug_title">yakapin si %1$s</string>

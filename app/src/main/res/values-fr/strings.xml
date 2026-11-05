@@ -170,6 +170,8 @@
     <string name="choose_action_user">choisis une action pour cet utilisateur</string>
     <string name="action_copy_message_title">copier le message</string>
     <string name="action_copy_message_subtitle">copier ce message dans le presse‑papiers</string>
+    <string name="action_retry_message_title">Réessayer l\'envoi</string>
+    <string name="action_retry_message_subtitle">Essayer d\'envoyer à nouveau ce message</string>
     <string name="action_slap_title">gifler %1$s</string>
     <string name="action_slap_subtitle">envoyer une gifle amicale</string>
     <string name="action_hug_title">prendre %1$s dans les bras</string>

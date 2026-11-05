@@ -218,6 +218,8 @@
     <string name="choose_action_user">wybierz działanie dla tego użytkownika</string>
     <string name="action_copy_message_title">kopiuj wiadomość</string>
     <string name="action_copy_message_subtitle">skopiuj tę wiadomość do schowka</string>
+    <string name="action_retry_message_title">Ponów wysyłanie</string>
+    <string name="action_retry_message_subtitle">Spróbuj ponownie wysłać tę wiadomość</string>
     <string name="action_slap_title">spoliczkuj %1$s</string>
     <string name="action_slap_subtitle">wyślij żartobliwą wiadomość o spoliczkowaniu</string>
     <string name="action_hug_title">przytul %1$s</string>

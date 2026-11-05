@@ -177,6 +177,8 @@
     <string name="choose_action_user">اس صارف کے لیے ایکشن منتخب کریں</string>
     <string name="action_copy_message_title">پیغام کاپی کریں</string>
     <string name="action_copy_message_subtitle">اس پیغام کو کلپ بورڈ میں کاپی کریں</string>
+    <string name="action_retry_message_title">دوبارہ بھیجیں</string>
+    <string name="action_retry_message_subtitle">یہ پیغام دوبارہ بھیجنے کی کوشش کریں</string>
     <string name="action_slap_title">%1$s کو تھپڑ</string>
     <string name="action_slap_subtitle">مزاحیہ تھپڑ بھیجیں</string>
     <string name="action_hug_title">%1$s کو گلے لگائیں</string>

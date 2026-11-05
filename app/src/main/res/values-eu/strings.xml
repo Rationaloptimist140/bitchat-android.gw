@@ -368,6 +368,8 @@
     <string name="choose_action_user">Aukeratu ekintza bat erabiltzaile honetarako</string>
     <string name="action_copy_message_title">Kopiatu mezua</string>
     <string name="action_copy_message_subtitle">Kopiatu mezu hau arbelean</string>
+    <string name="action_retry_message_title">Saiatu berriro bidaltzen</string>
+    <string name="action_retry_message_subtitle">Saiatu mezu hau berriro bidaltzen</string>
     <string name="action_slap_title">Zaplaztekoa %1$s erabiltzaileari</string>
     <string name="action_slap_subtitle">Bidali txantxetako zaplazteko-mezu bat</string>
     <string name="action_hug_title">Besarkatu %1$s</string>

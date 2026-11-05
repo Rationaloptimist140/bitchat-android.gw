@@ -177,6 +177,8 @@
     <string name="choose_action_user">Escolher ação para este utilizador</string>
     <string name="action_copy_message_title">Copiar mensagem</string>
     <string name="action_copy_message_subtitle">Copiar esta mensagem para a área de transferência</string>
+    <string name="action_retry_message_title">Tentar enviar novamente</string>
+    <string name="action_retry_message_subtitle">Tentar enviar esta mensagem novamente</string>
     <string name="action_slap_title">Dar uma palmada em %1$s</string>
     <string name="action_slap_subtitle">Enviar uma palmada brincalhona</string>
     <string name="action_hug_title">Abraçar %1$s</string>

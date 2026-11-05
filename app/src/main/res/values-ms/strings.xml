@@ -183,6 +183,8 @@
   <string name="choose_action_user">pilih tindakan untuk pengguna ini</string>
   <string name="action_copy_message_title">salin mesej</string>
   <string name="action_copy_message_subtitle">salin mesej ini ke papan keratan</string>
+  <string name="action_retry_message_title">Cuba hantar semula</string>
+  <string name="action_retry_message_subtitle">Cuba hantar mesej ini semula</string>
   <string name="action_slap_title">tampar %1$s</string>
   <string name="action_slap_subtitle">hantar mesej tamparan bergurau</string>
   <string name="action_hug_title">peluk %1$s</string>

@@ -177,6 +177,8 @@
     <string name="choose_action_user">kies een actie voor deze gebruiker</string>
     <string name="action_copy_message_title">bericht kopiëren</string>
     <string name="action_copy_message_subtitle">kopieer dit bericht naar klembord</string>
+    <string name="action_retry_message_title">Opnieuw verzenden</string>
+    <string name="action_retry_message_subtitle">Probeer dit bericht opnieuw te verzenden</string>
     <string name="action_slap_title">%1$s een tik geven</string>
     <string name="action_slap_subtitle">stuur een speelse tik</string>
     <string name="action_hug_title">%1$s knuffelen</string>

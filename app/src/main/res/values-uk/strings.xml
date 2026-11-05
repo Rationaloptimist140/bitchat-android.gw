@@ -203,6 +203,8 @@
     <string name="choose_action_user">виберіть дію для цього користувача</string>
     <string name="action_copy_message_title">скопіювати повідомлення</string>
     <string name="action_copy_message_subtitle">скопіювати це повідомлення в буфер обміну</string>
+    <string name="action_retry_message_title">Надіслати знову</string>
+    <string name="action_retry_message_subtitle">Спробувати надіслати це повідомлення ще раз</string>
     <string name="action_slap_title">ляснути %1$s</string>
     <string name="action_slap_subtitle">надіслати жартівливе повідомлення про ляпас</string>
     <string name="action_hug_title">обійняти %1$s</string>

@@ -157,6 +157,8 @@
     <string name="choose_action_user">выберите действие для пользователя</string>
     <string name="action_copy_message_title">копировать сообщение</string>
     <string name="action_copy_message_subtitle">скопировать сообщение в буфер</string>
+    <string name="action_retry_message_title">Отправить снова</string>
+    <string name="action_retry_message_subtitle">Попробовать отправить это сообщение ещё раз</string>
     <string name="action_slap_title">дать пощёчину %1$s</string>
     <string name="action_slap_subtitle">отправить шутливую пощёчину</string>
     <string name="action_hug_title">обнять %1$s</string>

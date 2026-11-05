@@ -177,6 +177,8 @@
     <string name="choose_action_user">এই ব্যবহারকারীর জন্য অ্যাকশন নির্বাচন করুন</string>
     <string name="action_copy_message_title">বার্তা কপি করুন</string>
     <string name="action_copy_message_subtitle">এই বার্তাটি ক্লিপবোর্ডে কপি করুন</string>
+    <string name="action_retry_message_title">আবার পাঠান</string>
+    <string name="action_retry_message_subtitle">এই বার্তাটি আবার পাঠানোর চেষ্টা করুন</string>
     <string name="action_slap_title">%1$s কে চড় দিন</string>
     <string name="action_slap_subtitle">একটি কৌতুকপূর্ণ চড় পাঠান</string>
     <string name="action_hug_title">%1$s কে আলিঙ্গন করুন</string>

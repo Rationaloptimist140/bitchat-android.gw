@@ -220,6 +220,8 @@
   <string name="choose_action_user">בחר פעולה עבור משתמש זה</string>
   <string name="action_copy_message_title">העתק הודעה</string>
   <string name="action_copy_message_subtitle">העתק הודעה זו ללוח</string>
+  <string name="action_retry_message_title">נסה לשלוח שוב</string>
+  <string name="action_retry_message_subtitle">נסה לשלוח את ההודעה הזו שוב</string>
   <string name="action_slap_title">סטור ל-%1$s</string>
   <string name="action_slap_subtitle">שלח הודעת סטירה שובבה</string>
   <string name="action_hug_title">חבק את %1$s</string>

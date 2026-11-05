@@ -177,6 +177,8 @@
     <string name="choose_action_user">აირჩიეთ ქმედება ამ მომხმარებლისთვის</string>
     <string name="action_copy_message_title">შეტყობინების კოპირება</string>
     <string name="action_copy_message_subtitle">ამ შეტყობინების კოპირება ბუფერში</string>
+    <string name="action_retry_message_title">ხელახლა გაგზავნა</string>
+    <string name="action_retry_message_subtitle">სცადეთ ამ შეტყობინების ხელახლა გაგზავნა</string>
     <string name="action_slap_title">%1$s-ის ლ®აპით დარტყმა</string>
     <string name="action_slap_subtitle">გაგზავნეთ ხუმრობით ლ®აპი</string>
     <string name="action_hug_title">%1$s-ის ჩახუტება</string>

@@ -177,6 +177,8 @@
     <string name="choose_action_user">Aktion für diesen Benutzer wählen</string>
     <string name="action_copy_message_title">Nachricht kopieren</string>
     <string name="action_copy_message_subtitle">Diese Nachricht in die Zwischenablage kopieren</string>
+    <string name="action_retry_message_title">Erneut senden</string>
+    <string name="action_retry_message_subtitle">Diese Nachricht erneut senden</string>
     <string name="action_slap_title">%1$s ohrfeigen</string>
     <string name="action_slap_subtitle">Eine spielerische Ohrfeige senden</string>
     <string name="action_hug_title">%1$s umarmen</string>

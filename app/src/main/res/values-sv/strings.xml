@@ -157,6 +157,8 @@
     <string name="choose_action_user">välj en åtgärd för den här användaren</string>
     <string name="action_copy_message_title">kopiera meddelande</string>
     <string name="action_copy_message_subtitle">kopiera meddelandet till urklipp</string>
+    <string name="action_retry_message_title">Försök skicka igen</string>
+    <string name="action_retry_message_subtitle">Försök skicka meddelandet igen</string>
     <string name="action_slap_title">ge %1$s en örfil</string>
     <string name="action_slap_subtitle">skicka en skämtsam örfil</string>
     <string name="action_hug_title">krama %1$s</string>

@@ -177,6 +177,8 @@
     <string name="choose_action_user">このユーザーの操作を選択</string>
     <string name="action_copy_message_title">メッセージをコピー</string>
     <string name="action_copy_message_subtitle">このメッセージをクリップボードにコピー</string>
+    <string name="action_retry_message_title">再送信</string>
+    <string name="action_retry_message_subtitle">このメッセージをもう一度送信します</string>
     <string name="action_slap_title">%1$s を平手打ち</string>
     <string name="action_slap_subtitle">冗談の平手打ちを送る</string>
     <string name="action_hug_title">%1$s をハグ</string>

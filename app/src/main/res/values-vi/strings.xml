@@ -177,6 +177,8 @@
     <string name="choose_action_user">Chọn hành động cho người dùng này</string>
     <string name="action_copy_message_title">Sao chép tin nhắn</string>
     <string name="action_copy_message_subtitle">Sao chép tin nhắn này vào clipboard</string>
+    <string name="action_retry_message_title">Thử gửi lại</string>
+    <string name="action_retry_message_subtitle">Thử gửi lại tin nhắn này</string>
     <string name="action_slap_title">Tát %1$s</string>
     <string name="action_slap_subtitle">Gửi một cái tát vui nhộn</string>
     <string name="action_hug_title">Ôm %1$s</string>

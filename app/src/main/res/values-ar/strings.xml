@@ -177,6 +177,8 @@
     <string name="choose_action_user">اختر إجراءً لهذا المستخدم</string>
     <string name="action_copy_message_title">نسخ الرسالة</string>
     <string name="action_copy_message_subtitle">انسخ هذه الرسالة إلى الحافظة</string>
+    <string name="action_retry_message_title">إعادة محاولة الإرسال</string>
+    <string name="action_retry_message_subtitle">حاول إرسال هذه الرسالة مرة أخرى</string>
     <string name="action_slap_title">صفع %1$s</string>
     <string name="action_slap_subtitle">إرسال صفعة ودّية</string>
     <string name="action_hug_title">عناق %1$s</string>

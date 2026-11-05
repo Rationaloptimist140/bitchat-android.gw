@@ -177,6 +177,8 @@
     <string name="choose_action_user">اس یوزر لئی عمل چُنو</string>
     <string name="action_copy_message_title">پیغام کاپی کرو</string>
     <string name="action_copy_message_subtitle">ایہ پیغام کلپ بورڈ وچ کاپی کرو</string>
+    <string name="action_retry_message_title">دوبارہ بھیجو</string>
+    <string name="action_retry_message_subtitle">ایہ سنیہا دوبارہ بھیجن دی کوشش کرو</string>
     <string name="action_slap_title">%1$s نوں چپیڑ مارو</string>
     <string name="action_slap_subtitle">مزاحیہ چپیڑ پھجو</string>
     <string name="action_hug_title">%1$s نوں گلے لاؤ</string>

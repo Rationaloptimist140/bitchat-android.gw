@@ -218,6 +218,8 @@
   <string name="choose_action_user">为此用户选择一个操作</string>
   <string name="action_copy_message_title">复制消息</string>
   <string name="action_copy_message_subtitle">将此消息复制到剪贴板</string>
+  <string name="action_retry_message_title">重新发送</string>
+  <string name="action_retry_message_subtitle">再次尝试发送此消息</string>
   <string name="action_slap_title">拍打 %1$s</string>
   <string name="action_slap_subtitle">发送一条俏皮的拍打消息</string>
   <string name="action_hug_title">拥抱 %1$s</string>

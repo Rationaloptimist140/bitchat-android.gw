@@ -177,6 +177,8 @@
     <string name="choose_action_user">Pilih aksi untuk pengguna ini</string>
     <string name="action_copy_message_title">Salin pesan</string>
     <string name="action_copy_message_subtitle">Salin pesan ini ke clipboard</string>
+    <string name="action_retry_message_title">Coba kirim lagi</string>
+    <string name="action_retry_message_subtitle">Coba kirim pesan ini lagi</string>
     <string name="action_slap_title">Tampar %1$s</string>
     <string name="action_slap_subtitle">Kirim tamparan main-main</string>
     <string name="action_hug_title">Peluk %1$s</string>

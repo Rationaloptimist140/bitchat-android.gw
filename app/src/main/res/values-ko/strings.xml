@@ -177,6 +177,8 @@
     <string name="choose_action_user">이 사용자에 대한 동작 선택</string>
     <string name="action_copy_message_title">메시지 복사</string>
     <string name="action_copy_message_subtitle">이 메시지를 클립보드에 복사</string>
+    <string name="action_retry_message_title">다시 보내기</string>
+    <string name="action_retry_message_subtitle">이 메시지를 다시 보내 봅니다</string>
     <string name="action_slap_title">%1$s를 때리기</string>
     <string name="action_slap_subtitle">장난스러운 따귀 보내기</string>
     <string name="action_hug_title">%1$s를 안기</string>

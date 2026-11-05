@@ -157,6 +157,8 @@
     <string name="choose_action_user">bu kullanıcı için bir işlem seç</string>
     <string name="action_copy_message_title">mesajı kopyala</string>
     <string name="action_copy_message_subtitle">mesajı panoya kopyala</string>
+    <string name="action_retry_message_title">Yeniden göndermeyi dene</string>
+    <string name="action_retry_message_subtitle">Bu mesajı yeniden göndermeyi dene</string>
     <string name="action_slap_title">%1$s kişisine şaplak</string>
     <string name="action_slap_subtitle">şakacı bir şaplak gönder</string>
     <string name="action_hug_title">%1$s kişisine sarıl</string>
