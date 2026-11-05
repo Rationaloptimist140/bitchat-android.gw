@@ -724,6 +724,24 @@ class NostrRelayManager private constructor(
     /**
      * Manually retry connection to a specific relay
      */
+    /**
+     * The device regained a validated internet connection: reconnect every disconnected relay now
+     * instead of waiting for its backoff, and resend due deliveries on open sockets.
+     */
+    fun onNetworkAvailable() {
+        if (!desiredConnected.get()) return
+        relaysList.toList().forEach { relay ->
+            if (connections.containsKey(relay.url)) return@forEach
+            val liveToken = liveLocationRelayTokens[relay.url]?.takeIf { relay.url !in nonLiveRelayUrls }
+            if (!isNetworkActionAllowed(liveToken)) return@forEach
+            relay.reconnectAttempts = 0
+            relay.nextReconnectTime = null
+            reconnectJobs.remove(relay.url)?.cancel()
+            scope.launch { connectToRelay(relay.url, liveToken) }
+        }
+        scope.launch { runCatching { sweepAcknowledgements() } }
+    }
+
     fun retryConnection(relayUrl: String) {
         val relay = relaysList.find { it.url == relayUrl } ?: return
         desiredConnected.set(true)

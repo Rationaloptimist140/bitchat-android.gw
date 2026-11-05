@@ -73,6 +73,9 @@ class BitchatApplication : Application() {
         // process level so closing the Activity does not disconnect Nostr.
         try { com.bitchat.android.nostr.NostrBackgroundRuntime.initialize(this) } catch (_: Exception) { }
 
+        // Reconnect relays and wake the durable outbox as soon as internet connectivity returns.
+        try { com.bitchat.android.net.NetworkMonitor.start(this) } catch (_: Exception) { }
+
         // Initialize mesh service preferences
         try { com.bitchat.android.service.MeshServicePreferences.init(this) } catch (_: Exception) { }
 

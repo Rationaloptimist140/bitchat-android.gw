@@ -61,6 +61,9 @@ object OkHttpProvider {
                 .connectTimeout(10, TimeUnit.SECONDS)
                 .readTimeout(0, TimeUnit.SECONDS)
                 .writeTimeout(10, TimeUnit.SECONDS)
+                // Keep-alive: detects half-open relay sockets (network switch, NAT timeout) so
+                // they fail and reconnect instead of silently swallowing writes.
+                .pingInterval(30, TimeUnit.SECONDS)
                 .build()
                 .also(wsClientRef::set)
         }

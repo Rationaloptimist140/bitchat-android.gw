@@ -39,7 +39,11 @@ class NostrDirectMessageHandler(
     private val receiptBinding: suspend (messageID: String, counterpartIds: Set<String>) -> Boolean =
         AppStateStore::isOutgoingMessageInConversation
 ) {
-    companion object { private const val TAG = "NostrDirectMessageHandler" }
+    companion object {
+        private const val TAG = "NostrDirectMessageHandler"
+        private const val RECEIPT_EXPIRY_MS = 48L * 60 * 60 * 1000
+        private const val REACK_MIN_INTERVAL_MS = 10L * 60 * 1000
+    }
 
     private val seenStore by lazy(seenStoreProvider)
 
@@ -138,7 +142,12 @@ class NostrDirectMessageHandler(
             NoisePayloadType.PRIVATE_MESSAGE -> {
                 val pm = PrivateMessagePacket.decode(payload.data) ?: return
                 val existingMessages = state.getPrivateChatsValue()[conversationID] ?: emptyList()
-                if (existingMessages.any { it.id == pm.messageID }) return
+                if (existingMessages.any { it.id == pm.messageID }) {
+                    // Already have it: the sender retried, so our earlier receipt was probably
+                    // lost. Re-acknowledge (rate-limited) instead of storing a second copy.
+                    if (isAccountDm) sendReceipt(NoisePayloadType.DELIVERED, pm.messageID, senderPubkey, conversationID, recipientIdentity, isAccountDm)
+                    return
+                }
 
                 val favoriteControl = FavoriteControlMessage.parse(pm.content)
                 if (favoriteControl != null) {
@@ -150,9 +159,9 @@ class NostrDirectMessageHandler(
                         senderPubkey
                     )
                     if (!admitted) return
-                    if (!seenStore.hasDelivered(pm.messageID)) {
-                        val nostrTransport = NostrTransport.getInstance(application)
-                        nostrTransport.sendDeliveryAckGeohash(pm.messageID, senderPubkey, recipientIdentity, privateChannel = isAccountDm)
+                    if (!seenStore.hasDelivered(pm.messageID) &&
+                        sendReceipt(NoisePayloadType.DELIVERED, pm.messageID, senderPubkey, conversationID, recipientIdentity, isAccountDm)
+                    ) {
                         seenStore.markDelivered(pm.messageID)
                     }
                     return
@@ -181,17 +190,25 @@ class NostrDirectMessageHandler(
                         origin = PrivateMessageOrigin.NOSTR
                     )
                 }
-                if (!admitted) return
+                if (!admitted) {
+                    // Rejected as a duplicate of a stored or deleted message: re-acknowledge so a
+                    // retrying sender converges. Blocked senders are unknown here and get nothing.
+                    if (isAccountDm && isKnownOrDeleted(pm.messageID)) {
+                        sendReceipt(NoisePayloadType.DELIVERED, pm.messageID, senderPubkey, conversationID, recipientIdentity, isAccountDm)
+                    }
+                    return
+                }
 
-                if (!seenStore.hasDelivered(pm.messageID)) {
-                    val nostrTransport = NostrTransport.getInstance(application)
-                    nostrTransport.sendDeliveryAckGeohash(pm.messageID, senderPubkey, recipientIdentity, privateChannel = isAccountDm)
+                // seenStore "delivered" means the receipt is durably queued (account DMs) or sent.
+                if (!seenStore.hasDelivered(pm.messageID) &&
+                    sendReceipt(NoisePayloadType.DELIVERED, pm.messageID, senderPubkey, conversationID, recipientIdentity, isAccountDm)
+                ) {
                     seenStore.markDelivered(pm.messageID)
                 }
 
-                if (isViewing && !suppressUnread) {
-                    val nostrTransport = NostrTransport.getInstance(application)
-                    nostrTransport.sendReadReceiptGeohash(pm.messageID, senderPubkey, recipientIdentity, privateChannel = isAccountDm)
+                if (isViewing && !suppressUnread &&
+                    sendReceipt(NoisePayloadType.READ_RECEIPT, pm.messageID, senderPubkey, conversationID, recipientIdentity, isAccountDm)
+                ) {
                     seenStore.markReadLocally(pm.messageID)
                     seenStore.markReadReceiptSent(pm.messageID)
                 }
@@ -327,6 +344,48 @@ class NostrDirectMessageHandler(
             false
         }
     }
+
+    /**
+     * Sends a delivery/read receipt. Account-identity receipts go through the durable outbox
+     * (retried until a relay accepts them, re-queued for duplicates at most every 10 minutes);
+     * geohash-identity receipts keep the direct path. Returns true once queued or sent.
+     */
+    private suspend fun sendReceipt(
+        type: NoisePayloadType,
+        messageId: String,
+        senderPubkey: String,
+        conversationID: String,
+        recipientIdentity: NostrIdentity,
+        isAccountDm: Boolean
+    ): Boolean {
+        val repository = if (isAccountDm) AppStateStore.conversationRepositoryOrNull() else null
+        if (repository != null) {
+            val now = System.currentTimeMillis()
+            val kind = if (type == NoisePayloadType.READ_RECEIPT) {
+                com.bitchat.android.services.OutboxStore.Kind.READ_RECEIPT
+            } else {
+                com.bitchat.android.services.OutboxStore.Kind.DELIVERY_ACK
+            }
+            val queued = runCatching {
+                repository.withOutbox {
+                    it.enqueueReceipt(kind, messageId, conversationID, senderPubkey, true, now, now + RECEIPT_EXPIRY_MS, REACK_MIN_INTERVAL_MS)
+                    true
+                }
+            }.getOrDefault(false)
+            if (queued) com.bitchat.android.services.MessageRouter.tryGetInstance()?.kickOutbox()
+            return queued
+        }
+        val nostrTransport = NostrTransport.getInstance(application)
+        if (type == NoisePayloadType.READ_RECEIPT) {
+            nostrTransport.sendReadReceiptGeohash(messageId, senderPubkey, recipientIdentity, privateChannel = isAccountDm)
+        } else {
+            nostrTransport.sendDeliveryAckGeohash(messageId, senderPubkey, recipientIdentity, privateChannel = isAccountDm)
+        }
+        return true
+    }
+
+    private suspend fun isKnownOrDeleted(messageId: String): Boolean =
+        AppStateStore.conversationRepositoryOrNull()?.isKnownOrDeletedMessage(messageId) ?: false
 
     /** Conversation ids for a receipt sender, derived only from its authenticated key. */
     private fun receiptCounterpartIds(conversationID: String, senderPubkey: String): Set<String> {

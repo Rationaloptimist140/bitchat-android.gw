@@ -353,6 +353,14 @@ class ConversationRepository internal constructor(
         )
     }
 
+    internal suspend fun isKnownOrDeletedMessage(messageID: String): Boolean = withContext(dispatcher) {
+        try {
+            database.isKnownOrDeletedMessage(messageID)
+        } catch (_: Exception) {
+            false
+        }
+    }
+
     internal suspend fun loadMessageWithConversation(messageID: String): Pair<String, BitchatMessage>? =
         withContext(dispatcher) {
             try {
@@ -919,6 +927,13 @@ internal class ConversationDatabase(
             "SELECT ${MESSAGE_COLUMNS.joinToString(",")} FROM private_messages WHERE message_id = ?",
             arrayOf(messageID)
         ).use { cursor -> if (cursor.moveToFirst()) cursor.toMessage().deliveryStatus else null }
+
+    /** True when [messageID] is stored or was deleted (tombstoned) on this device. */
+    fun isKnownOrDeletedMessage(messageID: String): Boolean {
+        val db = readableDatabase
+        return db.longForQuery("SELECT COUNT(*) FROM private_messages WHERE message_id = ?", arrayOf(messageID)) > 0L ||
+            isDeletedMessageLocked(db, messageID)
+    }
 
     /** The stored message and its conversation id, for sending from the outbox. */
     fun loadMessageWithConversation(messageID: String): Pair<String, BitchatMessage>? =

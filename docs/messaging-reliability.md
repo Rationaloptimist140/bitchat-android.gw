@@ -194,6 +194,20 @@ fails, the database stays at version 4 with all data, and the database is never 
 recreated. Downgrading to an older app version after the migration is not supported (older builds
 cannot open a version 5 database).
 
+## Receipts and reconnection
+
+- **Durable receipts.** Delivery and read receipts for account-identity DMs are outbox envelopes,
+  retried until a relay accepts them. `SeenMessageStore`'s "delivered" now means the receipt is
+  durably queued. Geohash-identity receipts keep the direct path.
+- **Re-acknowledging duplicates.** When a private message arrives that is already stored (from any
+  transport) or was deleted locally, it is not stored again. A receipt is re-queued at most every
+  10 minutes, so a sender whose earlier receipt was lost stops retrying. Mesh receivers already
+  acknowledged duplicates.
+- **Keep-alive.** Relay WebSockets ping every 30 s, so half-open sockets (network switch, NAT
+  timeout) fail and reconnect instead of silently swallowing writes.
+- **Network monitor.** When a validated internet connection becomes available, disconnected relays
+  reconnect immediately (backoff reset) and the outbox is woken (`NetworkMonitor`).
+
 ## Known pre-existing test issues
 
 - `FileUtilsClearAllMediaTest` "reports failure when a media directory survives" fails only in
